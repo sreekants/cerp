@@ -1,0 +1,97 @@
+[project]
+name = "cerp"
+version = "0.1.0.dev0"
+description = "cerp (Claude ERP): an MCP server and Claude personas for the webos small-business ERP"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Sreekant Sreedharan" }]
+requires-python = ">=3.13"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=2.3,<3",
+    "pydantic>=2.14,<3",
+    "pyyaml>=6.0.3",
+    "uvicorn>=0.54",
+]
+
+[project.optional-dependencies]
+# Persona runner (MPC002-082). Kept optional so the server installs without it.
+runner = ["claude-agent-sdk>=0.2.172"]
+
+[project.scripts]
+cerp = "cerp.cli:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170",
+    "import-linter>=2.15",
+    "mypy>=2.4",
+    "pip-audit>=2.10",
+    "pytest>=9.1",
+    "ruff>=0.17",
+    "types-pyyaml>=6.0.12",
+]
+
+[build-system]
+requires = ["hatchling>=1.32"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+default-groups = ["dev"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# S = flake8-bandit (MPC001-008: no eval/exec/pickle/shell=True/SQL by formatting)
+select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "RUF", "PL", "PT", "ASYNC", "TRY"]
+ignore = ["PLR0913", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.13"
+strict = true
+mypy_path = "src"
+packages = ["cerp"]
+warn_unreachable = true
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+xfail_strict = true
+
+# ---------------------------------------------------------------- import-linter (MPC001-005)
+[tool.importlinter]
+root_package = "cerp"
+
+[[tool.importlinter.contracts]]
+name = "Layers: app > persona > tools > (protocol | auth) > data"
+type = "layers"
+layers = [
+    "cerp.app",
+    "cerp.persona",
+    "cerp.tools",
+    "cerp.protocol | cerp.auth",
+    "cerp.data",
+]
+
+[[tool.importlinter.contracts]]
+name = "The protocol layer never touches the data layer"
+type = "forbidden"
+source_modules = ["cerp.protocol"]
+forbidden_modules = ["cerp.data"]

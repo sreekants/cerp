@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.python-build/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.import_linter_cache/
+.coverage
+htmlcov/
+
+# Local configuration, data and secrets (never commit)
+.env
+*.local.yaml
+secrets/
+var/
+*.s3db
+*.s3db-wal
+*.s3db-shm
+!tests/fixtures/**/*.s3db
+
+# Claude Code personal settings
+.claude/settings.local.json
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
