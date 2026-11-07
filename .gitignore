@@ -25,6 +25,7 @@ var/
 *.s3db-wal
 *.s3db-shm
 !tests/fixtures/**/*.s3db
+!data/template/*.s3db
 
 # Claude Code personal settings
 .claude/settings.local.json
@@ -34,3 +35,6 @@ var/
 Thumbs.db
 .idea/
 .vscode/
+
+# Work area
+workspace/

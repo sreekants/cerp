@@ -1,9 +1,10 @@
-"""Structured JSON logging (MPC001-111).
+"""Structured JSON logging (MPC001-111, MPC001-112).
 
-Every line is one JSON object with ``ts``, ``level``, ``component`` (the logger name), ``correlation_id`` and
-``msg``, written to stderr and, when configured, to a rotating file. A redaction filter removes bearer tokens
-and anything that looks like an API key from the message before it is written (MPC001-056); code must still
-never pass secrets, full tool arguments or customer message bodies to the logger.
+Every line is one JSON object with ``ts``, ``level``, ``component`` (the logger name), ``correlation_id``,
+``trace_id`` (from the client's ``traceparent``) and ``msg``, written to stderr and, when configured, to a
+rotating file. A redaction filter removes bearer tokens and anything that looks like an API key from the
+message before it is written (MPC001-056); code must still never pass secrets, full tool arguments or
+customer message bodies to the logger.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "component": record.name,
             "correlation_id": cid,
+            "trace_id": correlation.current_trace(),
             "msg": redact(record.getMessage()),
         }
         if record.exc_info:
@@ -73,6 +75,26 @@ def configure_logging(
         )
     for h in handlers:
         h.setFormatter(fmt)
-        h._cerp = True  # type: ignore[attr-defined]
+        h._cerp = True  # type: ignore[attr-defined]  # marker so reconfiguration removes only our handlers
         root.addHandler(h)
     root.setLevel(level)
+
+
+def configure_audit(file: Path | None, *, max_bytes: int = 50 * 1024 * 1024, backups: int = 10) -> None:
+    """Route ``cerp.audit`` records (MPC001-110). With a file, records go only there, one JSON object per
+    line; without one they go to the normal log. Safe to call more than once."""
+    audit = logging.getLogger("cerp.audit")
+    for h in list(audit.handlers):
+        if getattr(h, "_cerp", False):
+            audit.removeHandler(h)
+            h.close()
+    audit.setLevel(logging.INFO)
+    if file is None:
+        audit.propagate = True
+        return
+    file.parent.mkdir(parents=True, exist_ok=True)
+    h = logging.handlers.RotatingFileHandler(file, maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
+    h.setFormatter(logging.Formatter("%(message)s"))
+    h._cerp = True  # type: ignore[attr-defined]  # marker so reconfiguration removes only our handlers
+    audit.addHandler(h)
+    audit.propagate = False

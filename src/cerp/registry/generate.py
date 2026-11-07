@@ -21,7 +21,6 @@ import hashlib
 import re
 import sqlite3
 import sys
-import xml.etree.ElementTree as ET
 from collections import Counter
 from collections.abc import Sequence
 from contextlib import closing
@@ -32,6 +31,7 @@ from typing import Any
 import yaml
 
 from cerp import __version__
+from cerp.data.datasources import DatasourceLocator, read_datasource_file
 from cerp.data.registry import SCHEMA_VERSION, table_name_for
 
 TREES = ("objects", "services")
@@ -83,6 +83,7 @@ class Gen:
     dbroot: Path | None
     hashes: dict[str, str] = field(default_factory=dict)
     warnings: list[dict[str, str]] = field(default_factory=list)
+    locator: DatasourceLocator | None = None
 
     def warn(self, code: str, model: str, detail: str) -> None:
         self.warnings.append({"code": code, "model": model, "detail": detail})
@@ -111,23 +112,17 @@ def parse_wsidl(text: str) -> list[dict[str, Any]] | None:
             if not param or param == "void":
                 continue
             parts = param.split()
-            if len(parts) != 2:  # noqa: PLR2004
+            if len(parts) != 2:  # noqa: PLR2004 - a parameter is "<type> <name>"
                 return None
             plist.append({"type": parts[0], "name": parts[1]})
         methods.append({"name": name, "returns": ret, "params": plist})
     return methods
 
 
-def parse_datasources(text: str) -> dict[str, str]:
-    root = ET.fromstring(text)  # noqa: S314 - developer-supplied local file, not network input
-    out: dict[str, str] = {}
-    for ds in root.iter("DataSource"):
-        name = (ds.findtext("Name") or "").strip()
-        conn = (ds.findtext("ConnectString") or "").strip()
-        m = _DBQ.search(conn)
-        if name and m:
-            out[name] = m.group(1).strip()
-    return out
+def parse_datasources(path: Path) -> dict[str, str]:
+    """Datasource name → raw DBQ path, through the datasource locator's parser (MPC001-200)."""
+    raw, _, _ = read_datasource_file(path)
+    return raw
 
 
 def read_columns(db: Path, table: str) -> list[dict[str, Any]] | None:
@@ -184,7 +179,11 @@ def _model_key(rel: PurePosixPath) -> tuple[str, str, str]:
 
 def build(portal: Path, datasources: Path, dbroot: Path | None) -> dict[str, Any]:
     g = Gen(portal, datasources, dbroot)
-    ds_map = parse_datasources(g.read(datasources, f"datasources/{datasources.name}"))
+    g.read(datasources, f"datasources/{datasources.name}")  # source hash only
+    ds_map = parse_datasources(datasources)
+    if dbroot is not None:
+        # Resolve exactly as the server does: the locator with DBROOT pointed at --dbroot.
+        g.locator = DatasourceLocator(ds_map, {"DBROOT": str(dbroot)}, Path.cwd(), {}, strict=False)
     models: dict[str, Any] = {}
     class_ids: Counter[str] = Counter()
 
@@ -282,7 +281,11 @@ def _storage(
     if ds and ds not in ds_map:
         g.warn("datasource_unmapped", key, f"datasource {ds!r} is not in the datasource map")
     if g.dbroot is not None and out["file"] and table:
-        db = Path(out["file"].replace("$(DBROOT)", str(g.dbroot)))
+        db = (
+            g.locator.paths().get(ds, Path(out["file"]))
+            if g.locator is not None and ds
+            else Path(out["file"])
+        )
         if not db.is_file():
             g.warn("database_missing", key, f"{PurePosixPath(out['file']).name} not found under dbroot")
         else:

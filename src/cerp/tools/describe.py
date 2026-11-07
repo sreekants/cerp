@@ -14,8 +14,10 @@ from mcp_types import ToolAnnotations
 from pydantic import BaseModel
 
 from cerp.data.exposure import ExposedModel, Exposure
-from cerp.protocol.boundary import guarded
+from cerp.protocol.killswitch import NO_SWITCHES, KillSwitch
 from cerp.protocol.naming import generic_name
+from cerp.protocol.scopes import NO_SCOPES, ScopePolicy
+from cerp.protocol.tooling import register_tool
 
 READ_ONLY = ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -65,10 +67,17 @@ def _bind(result: ModelDescription, doc: str) -> Callable[[], ModelDescription]:
         return result
 
     describe_model.__doc__ = doc
-    return guarded(describe_model)
+    return describe_model
 
 
-def register_describe_tools(mcp: MCPServer, exposure: Exposure) -> list[str]:
+def describe_tool_names(exposure: Exposure) -> list[str]:
+    """Names of the describe tools an exposure produces, in registration order."""
+    return [generic_name(em.module, "describe", em.name) for em in exposure.models if "describe" in em.verbs]
+
+
+def register_describe_tools(
+    mcp: MCPServer, exposure: Exposure, killswitch: KillSwitch = NO_SWITCHES, scopes: ScopePolicy = NO_SCOPES
+) -> list[str]:
     """Register one describe tool per exposed model that offers the ``describe`` verb."""
     names: list[str] = []
     for em in exposure.models:
@@ -76,6 +85,14 @@ def register_describe_tools(mcp: MCPServer, exposure: Exposure) -> list[str]:
             continue
         name = generic_name(em.module, "describe", em.name)
         doc = f"Describe the fields of {em.module}:{em.name} records: {em.description}"
-        mcp.tool(name=name, title=f"Describe {em.name}", annotations=READ_ONLY)(_bind(describe(em), doc))
+        register_tool(
+            mcp,
+            _bind(describe(em), doc),
+            name=name,
+            title=f"Describe {em.name}",
+            annotations=READ_ONLY,
+            killswitch=killswitch,
+            scopes=scopes,
+        )
         names.append(name)
     return names

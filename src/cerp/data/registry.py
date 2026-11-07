@@ -17,6 +17,8 @@ from typing import Any, Final
 
 import yaml
 
+from cerp.data.datasources import DatasourceError, DatasourceLocator
+
 SCHEMA_VERSION: Final = 1
 
 
@@ -97,8 +99,15 @@ class Registry:
         return hashlib.sha256(blob).hexdigest()[:16]
 
     def database_files(self, dbroot: Path) -> dict[str, Path]:
-        """Datasource name → database path, with ``$(DBROOT)`` replaced by ``dbroot``."""
-        return {name: Path(f.replace("$(DBROOT)", str(dbroot))) for name, f in self.datasources.items()}
+        """Datasource name → database path with ``$(DBROOT)`` = ``dbroot``, resolved by the datasource
+        locator (MPC001-200). Datasources that need other variables are left out."""
+        out: dict[str, Path] = {}
+        for name, f in self.datasources.items():
+            try:
+                out[name] = DatasourceLocator({name: f}, {"DBROOT": str(dbroot)}, Path.cwd(), {}).path(name)
+            except DatasourceError:
+                continue
+        return out
 
 
 def _model(key: str, raw: Mapping[str, Any]) -> Model:

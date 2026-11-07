@@ -16,9 +16,12 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "jsonschema>=4.26",
     "mcp>=2.3,<3",
     "pydantic>=2.14,<3",
+    "pyjwt[crypto]>=2.15",  # MPC001-057, MPC001-070: vetted JWT and crypto
     "pyyaml>=6.0.3",
+    "regex>=2025.11",
     "uvicorn>=0.54",
 ]
 
@@ -31,13 +34,16 @@ cerp = "cerp.cli:main"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28",
     "hypothesis>=6.170",
     "import-linter>=2.15",
     "mypy>=2.4",
     "pip-audit>=2.10",
     "pytest>=9.1",
     "ruff>=0.17",
+    "types-jsonschema>=4.26.0.20261006",
     "types-pyyaml>=6.0.12",
+    "types-regex>=2026.9.29.20261017",
 ]
 
 [build-system]
@@ -95,3 +101,15 @@ name = "The protocol layer never touches the data layer"
 type = "forbidden"
 source_modules = ["cerp.protocol"]
 forbidden_modules = ["cerp.data"]
+
+[[tool.importlinter.contracts]]
+name = "The data layer imports nothing else from cerp"
+type = "forbidden"
+source_modules = ["cerp.data"]
+forbidden_modules = ["cerp.app", "cerp.persona", "cerp.tools", "cerp.protocol", "cerp.auth", "cerp.registry", "cerp.cli"]
+
+[[tool.importlinter.contracts]]
+name = "The server never imports the registry generator (MPC002-006)"
+type = "forbidden"
+source_modules = ["cerp.app.server", "cerp.app.asgi", "cerp.persona", "cerp.tools", "cerp.protocol", "cerp.auth", "cerp.data"]
+forbidden_modules = ["cerp.registry"]

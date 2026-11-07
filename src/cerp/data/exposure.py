@@ -26,6 +26,7 @@ from typing import Any, Final
 
 import yaml
 
+from cerp.data.filtering import is_secret_field
 from cerp.data.registry import Model, Registry, field_name
 
 VERBS: Final = ("describe", "query", "get", "create", "update", "transition")
@@ -56,6 +57,26 @@ class Exposure:
 
     def get(self, module: str, name: str) -> ExposedModel | None:
         return next((m for m in self.models if (m.module, m.name) == (module, name)), None)
+
+    def check_fields(self, module: str, name: str, fields: list[str]) -> list[str]:
+        """Return ``fields`` if every one is exposed for the model; otherwise raise :class:`UnknownField`.
+
+        Field names arriving in tool arguments (filters, sort keys, selections) must pass through this check
+        before any SQL is built, so a column name can never come from request data (MPC001-008).
+        """
+        em = self.get(module, name)
+        if em is None:
+            raise UnknownField(f"{module}:{name} is not exposed", allowed=[])
+        bad = [f for f in fields if f not in em.fields]
+        if bad:
+            raise UnknownField(f"unknown field {bad[0]!r} for {module}:{name}", allowed=list(em.fields))
+        return list(fields)
+
+
+class UnknownField(ValueError):
+    def __init__(self, message: str, *, allowed: list[str]) -> None:
+        super().__init__(message)
+        self.allowed = allowed
 
 
 def _strs(value: Any, where: str, errors: list[str]) -> list[str]:
@@ -95,6 +116,12 @@ def _entry(key: str, spec: Any, registry: Registry, errors: list[str]) -> Expose
     if not isinstance(spec, dict):
         errors.append(f"{where}: must be a mapping")
         return None
+    if model.type == "Script":
+        errors.append(
+            f"{where}: a Script model's JScript logic must be ported before it is exposed "
+            "(MPC001-164, docs/webos/script-models.md)"
+        )
+        return None
     if not model.is_table or not model.datasource or not model.table:
         errors.append(f"{where}: only Database.Table models with a datasource and table can be exposed")
         return None
@@ -113,6 +140,11 @@ def _entry(key: str, spec: Any, registry: Registry, errors: list[str]) -> Expose
         f"{where}.verbs: unknown verb {v!r} (allowed: {', '.join(VERBS)})" for v in verbs if v not in VERBS
     ]
     errors += [f"{where}.fields: no column {f!r} in {model.table}" for f in fields if f not in columns]
+    errors += [
+        f"{where}.fields: {f!r} looks like a secret and is never returned (MPC001-066)"
+        for f in fields
+        if is_secret_field(f)
+    ]
     errors += [f"{where}.sortable: {f!r} is not an exposed field" for f in sortable if f not in fields]
     errors += [f"{where}.field_descriptions: {f!r} is not an exposed field" for f in fdesc if f not in fields]
     errors += [

@@ -1,0 +1,20 @@
+# Which registry models cerp exposes, and how (MPC001-080). Keys are registry model keys.
+# Verbs: describe, query, get, create, update, transition. Only `describe` has tools today.
+models:
+  objects/support/ticket:
+    name: ticket
+    verbs: [describe]
+    description: A customer or internal support ticket.
+    fields: [id, short_name, description, status, severity, priority, type, owner, entered_by,
+             released_product_id, product_component_id, due_date, creation_time, modification_time]
+    sortable: [creation_time, modification_time, due_date, priority, severity]
+    field_descriptions:
+      status: "1000 Open, 2000 Fixed, 3000 Reviewed, 4000 Tested, 5000 Closed"
+      severity: "100 Low, 200 Medium, 300 High, 400 Critical, 500 Blocker"
+      type: "100 Defect, 200 Enhancement"
+      priority: "1-9, default 5; whether 9 is high or low is not yet confirmed"
+  objects/support/released_product:
+    name: released_product
+    verbs: [describe]
+    description: A product (or service) that tickets are raised against.
+    fields: [id, name, status]

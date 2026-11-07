@@ -27,7 +27,9 @@ from mcp_types import CallToolResult, TextContent
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from cerp.protocol import correlation
+from cerp.protocol.audit import AuditSink, build_record, log_sink
 from cerp.protocol.errors import INTERNAL_ERROR, Busy, DomainError
+from cerp.protocol.killswitch import NO_SWITCHES, KillSwitch
 
 log = logging.getLogger("cerp.protocol")
 
@@ -112,11 +114,44 @@ def _with_correlation(err: MCPError, cid: str) -> MCPError:
     return MCPError(err.code, err.message, merged)
 
 
-class RequestMiddleware:
-    """SDK server middleware: correlation id, version gate, error decoration, one log line per request."""
+def _with_tool_correlation(result: dict[str, Any], cid: str) -> dict[str, Any]:
+    """Tool errors the SDK makes itself (e.g. unknown tool) carry no correlation id; add one (MPC001-012)."""
+    sc = result.get("structuredContent")
+    if isinstance(sc, dict):
+        err = sc.get("error")
+        if isinstance(err, dict) and err.get("correlation_id"):
+            return result
+        if isinstance(err, dict):
+            return {**result, "structuredContent": {**sc, "error": {**err, "correlation_id": cid}}}
+        return {**result, "structuredContent": {**sc, "error": {"code": "tool_error", "correlation_id": cid}}}
+    return {**result, "structuredContent": {"error": {"code": "tool_error", "correlation_id": cid}}}
 
-    def __init__(self, protocol_versions: Collection[str]) -> None:
+
+def _traceparent(ctx: ServerRequestContext[Any, Any]) -> str | None:
+    """``traceparent`` from the request's ``_meta`` or, failing that, its HTTP headers (MPC001-112)."""
+    meta = ctx.params.get("_meta") if isinstance(ctx.params, dict) else None
+    if isinstance(meta, dict) and isinstance(meta.get("traceparent"), str):
+        return str(meta["traceparent"])
+    headers = getattr(ctx.request, "headers", None)
+    if headers is not None:
+        value = headers.get("traceparent")
+        return value if isinstance(value, str) else None
+    return None
+
+
+class RequestMiddleware:
+    """SDK server middleware: correlation and trace ids, version gate, kill switches, error decoration
+    and one log line per request."""
+
+    def __init__(
+        self,
+        protocol_versions: Collection[str],
+        killswitch: KillSwitch = NO_SWITCHES,
+        audit: AuditSink | None = log_sink,
+    ) -> None:
         self.protocol_versions = tuple(protocol_versions)
+        self.killswitch = killswitch
+        self.audit = audit
 
     def _requested_version(self, ctx: ServerRequestContext[Any, Any]) -> str | None:
         if ctx.method == "initialize" and ctx.params is not None:
@@ -126,12 +161,33 @@ class RequestMiddleware:
             return ctx.protocol_version
         return None  # handshake era: checked once, at initialize
 
+    def _audit(
+        self, ctx: ServerRequestContext[Any, Any], cid: str, outcome: str, result: Any, ms: float
+    ) -> None:
+        assert self.audit is not None  # noqa: S101 - checked by the caller
+        try:
+            self.audit(
+                build_record(
+                    correlation_id=cid,
+                    trace_id=correlation.current_trace(),
+                    params=ctx.params,
+                    session=ctx.session,
+                    outcome=outcome,
+                    result=result,
+                    latency_ms=ms,
+                )
+            )
+        except Exception:
+            log.exception("audit record could not be written")
+
     async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next: CallNext) -> HandlerResult:
         cid = correlation.new_correlation_id()
         token = correlation.bind(cid)
+        trace_token = correlation.bind_trace(correlation.parse_traceparent(_traceparent(ctx)))
         started = time.perf_counter()
         name = ctx.params.get("name") if ctx.params and ctx.method == "tools/call" else None
         outcome = "ok"
+        result: HandlerResult = None
         try:
             requested = self._requested_version(ctx)
             if requested is not None and requested not in self.protocol_versions:
@@ -152,8 +208,17 @@ class RequestMiddleware:
         else:
             if isinstance(result, dict) and result.get("isError"):
                 outcome = "tool_error"
+                result = _with_tool_correlation(result, cid)
+            if (
+                ctx.method == "tools/list"
+                and isinstance(result, dict)
+                and isinstance(result.get("tools"), list)
+            ):
+                result = {**result, "tools": self.killswitch.filter_tools(result["tools"])}
             return result
         finally:
+            if ctx.method == "tools/call" and self.audit is not None:
+                self._audit(ctx, cid, outcome, result, (time.perf_counter() - started) * 1000)
             if ctx.request_id is not None:
                 log.info(
                     "%s%s %s %.1fms",
@@ -162,4 +227,5 @@ class RequestMiddleware:
                     outcome,
                     (time.perf_counter() - started) * 1000,
                 )
+            correlation.reset_trace(trace_token)
             correlation.reset(token)

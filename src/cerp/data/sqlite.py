@@ -45,6 +45,8 @@ class Databases:
         self._files = {name: Path(p).resolve() for name, p in files.items()}
         self._opts = options or DbOptions()
         self._local = threading.local()
+        self._all: list[sqlite3.Connection] = []
+        self._all_lock = threading.Lock()
 
     @property
     def names(self) -> list[str]:
@@ -66,7 +68,7 @@ class Databases:
             uri=True,
             timeout=self._opts.busy_timeout_ms / 1000,
             isolation_level=None,  # explicit transactions only
-            check_same_thread=True,
+            check_same_thread=False,  # one thread uses each connection; close_all() may run elsewhere
         )
         con.row_factory = sqlite3.Row
         con.execute(f"PRAGMA busy_timeout = {int(self._opts.busy_timeout_ms)}")
@@ -84,6 +86,8 @@ class Databases:
         con = cache.get(key)
         if con is None:
             con = cache[key] = self._open(name, writable=writable)
+            with self._all_lock:
+                self._all.append(con)
         return con
 
     @contextmanager
@@ -114,6 +118,15 @@ class Databases:
                     self._opts.write_budget_ms,
                 )
 
+    def can_open(self, name: str) -> bool:
+        """True if the database exists and answers a read (readiness check, MPC001-037)."""
+        try:
+            with self.reader(name) as con:
+                con.execute("SELECT 1").fetchone()
+        except (sqlite3.Error, OSError, UnknownDatasource):
+            return False
+        return True
+
     def check_journal_modes(self) -> dict[str, str]:
         """Journal mode per existing database; logs a warning for each that is not WAL."""
         modes: dict[str, str] = {}
@@ -136,6 +149,24 @@ class Databases:
         with self.reader(name) as con:
             rows = con.execute("SELECT name FROM pragma_table_info(?)", (table,)).fetchall()
         return [r[0] for r in rows] or None
+
+    def close_all(self) -> None:
+        """Close every connection opened by any thread (graceful shutdown, MPC001-117).
+
+        Call only after request handling has stopped. An open transaction is rolled back by SQLite on close.
+        """
+        with self._all_lock:
+            conns, self._all = self._all, []
+        for con in conns:
+            try:
+                if con.in_transaction:
+                    con.execute("ROLLBACK")
+                con.close()
+            except sqlite3.ProgrammingError:
+                pass  # created in another thread and already closed there
+        cache = getattr(self._local, "cache", None)
+        if cache:
+            cache.clear()
 
     def close(self) -> None:
         cache: dict[tuple[str, bool], sqlite3.Connection] | None = getattr(self._local, "cache", None)

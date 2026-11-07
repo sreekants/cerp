@@ -10,9 +10,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import re
 import time
-import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -23,8 +23,6 @@ from jsonschema import ValidationError as JsonSchemaError
 from jsonschema.exceptions import SchemaError
 from referencing import Registry, Resource
 from referencing.exceptions import NoSuchResource
-
-_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class SchemaRejected(Exception):
@@ -38,36 +36,102 @@ class Problem:
 
 
 _format_checker = FormatChecker(formats=())
+_schema_checker = FormatChecker(formats=())  # used on schemas themselves: ``pattern`` is a ``regex``
+
+# RFC 3339 (section 5.6), ASCII only. Python's fromisoformat accepts ISO 8601 forms RFC 3339 does not.
+_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})\Z", re.ASCII)
+_DATETIME = re.compile(
+    r"(\d{4}-\d{2}-\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:([Zz])|([+-])(\d{2}):(\d{2}))\Z", re.ASCII
+)
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.ASCII | re.I)
+
+# RFC 5321 Mailbox: Dot-string or Quoted-string "@" Domain or address literal. ASCII only (no RFC 6531).
+_ATEXT = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+_LOCAL = rf'(?:{_ATEXT}(?:\.{_ATEXT})*|"(?:[\x20\x21\x23-\x5b\x5d-\x7e]|\\[\x20-\x7e])*")'
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_EMAIL = re.compile(rf"{_LOCAL}@(?:{_LABEL}(?:\.{_LABEL})*|\[([^\[\]]*)\])\Z", re.ASCII)
+_IPV4 = re.compile(
+    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}\Z", re.ASCII
+)
+_LEAP_MINUTE = 23 * 60 + 59
+_MINUTES_PER_DAY = 24 * 60
+_MAX_HOUR, _MAX_MINUTE, _LEAP_SECOND = 23, 59, 60
 
 
-@_format_checker.checks("date", raises=ValueError)
+def _valid_date(text: str) -> bool:
+    m = _DATE.match(text)
+    if not m:
+        return False
+    try:
+        dt.date(int(m[1]), int(m[2]), int(m[3]))
+    except ValueError:
+        return False
+    return True
+
+
+@_format_checker.checks("date")
 def _is_date(value: object) -> bool:
-    return not isinstance(value, str) or bool(dt.date.fromisoformat(value))
+    return not isinstance(value, str) or _valid_date(value)
 
 
-@_format_checker.checks("date-time", raises=ValueError)
+@_format_checker.checks("date-time")
 def _is_datetime(value: object) -> bool:
     if not isinstance(value, str):
         return True
-    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed.tzinfo is not None or "T" in value
+    m = _DATETIME.match(value)
+    if not m or not _valid_date(m[1]):
+        return False
+    hour, minute, second = int(m[2]), int(m[3]), int(m[4])
+    off = 0
+    if not m[5]:
+        oh, om = int(m[7]), int(m[8])
+        if oh > _MAX_HOUR or om > _MAX_MINUTE:
+            return False
+        off = (oh * 60 + om) * (1 if m[6] == "+" else -1)
+    if hour > _MAX_HOUR or minute > _MAX_MINUTE or second > _LEAP_SECOND:
+        return False
+    # A leap second is only valid at 23:59:60 UTC.
+    return second < _LEAP_SECOND or (hour * 60 + minute - off) % _MINUTES_PER_DAY == _LEAP_MINUTE
+
+
+def _valid_ipv6(text: str) -> bool:
+    try:
+        ipaddress.IPv6Address(text)
+    except ValueError:
+        return False
+    return True
 
 
 @_format_checker.checks("email")
 def _is_email(value: object) -> bool:
-    return not isinstance(value, str) or bool(_EMAIL.match(value))
+    if not isinstance(value, str):
+        return True
+    m = _EMAIL.match(value)
+    if not m:
+        return False
+    literal = m[1]
+    if literal is None:
+        return True
+    if literal[:5].lower() == "ipv6:":
+        return _valid_ipv6(literal[5:])
+    return bool(_IPV4.match(literal))
 
 
-@_format_checker.checks("uuid", raises=ValueError)
+@_format_checker.checks("uuid")
 def _is_uuid(value: object) -> bool:
-    return not isinstance(value, str) or bool(uuid.UUID(value))
+    return not isinstance(value, str) or bool(_UUID.match(value))
+
+
+@_schema_checker.checks("regex", raises=regex.error)
+def _is_regex(value: object) -> bool:
+    return not isinstance(value, str) or bool(regex.compile(value))
 
 
 def _no_remote(uri: str) -> Resource[Any]:
     raise NoSuchResource(ref=uri)  # type: ignore[call-arg]  # attrs-generated init, stubs lag
 
 
-_NO_REMOTE: Registry[Any] = Registry(retrieve=_no_remote)  # type: ignore[call-arg]
+_NO_REMOTE: Registry[Any] = Registry(retrieve=_no_remote)  # type: ignore[call-arg]  # attrs-generated init, stubs lag
 
 
 class _Budget:
@@ -107,7 +171,7 @@ def _make_validator_class(budget_ref: list[_Budget]) -> type[Draft202012Validato
                 if _bounded_search(patrn, k, budget_ref[0]):
                     yield from validator.descend(v, subschema, path=k, schema_path=patrn)
 
-    cls: type[Draft202012Validator] = validators.extend(  # type: ignore[no-untyped-call]
+    cls: type[Draft202012Validator] = validators.extend(  # type: ignore[no-untyped-call]  # jsonschema stubs leave extend untyped
         Draft202012Validator, {"pattern": pattern, "patternProperties": pattern_properties}
     )
     return cls
@@ -137,7 +201,7 @@ class BoundedValidator:
         if external is not None:
             raise SchemaRejected(f"external $ref not allowed: {external}")
         try:
-            Draft202012Validator.check_schema(schema)
+            Draft202012Validator.check_schema(schema, format_checker=_schema_checker)
         except SchemaError as exc:
             raise SchemaRejected(f"invalid schema: {exc.message}") from None
         self._budget_s = budget_ms / 1000
@@ -153,7 +217,7 @@ class BoundedValidator:
             for err in self._validator.iter_errors(instance):
                 out.append(Problem(err.json_path, err.message))
                 if self._budget_ref[0].remaining() <= 0:
-                    raise _Expired  # noqa: TRY301
+                    raise _Expired  # noqa: TRY301 - one handler for both budget exits
         except _Expired:
             return [Problem("$", "validation took too long; simplify the value")]
         return out

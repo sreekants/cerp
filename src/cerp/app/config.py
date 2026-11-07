@@ -55,6 +55,8 @@ class ServerSection(_Section):
     protocol_versions: list[str] = Field(default_factory=lambda: ["2025-06-18", "2025-11-25", "2026-07-28"])
     # MPC001-015: whether MCP discovery needs credentials when auth is enabled.
     discovery_requires_auth: bool = True
+    # MPC001-115: poll the config and exposure files and reload on change (0 = off; SIGHUP still works).
+    reload_poll_seconds: float = Field(default=5.0, ge=0)
 
 
 class HttpSection(_Section):
@@ -62,12 +64,12 @@ class HttpSection(_Section):
     port: int = Field(default=7411, ge=1, le=65535)
     path: str = "/mcp"
     stateless: bool = True  # MPC001-014
-    max_request_body_bytes: int = Field(default=4 * 1024 * 1024, ge=1024)
+    max_request_body_bytes: int = Field(default=1024 * 1024, ge=1024)  # MPC001-010
 
     @field_validator("path")
     @classmethod
     def _path_shape(cls, v: str) -> str:
-        if not v.startswith("/") or v.endswith("/") or len(v) < 2:  # noqa: PLR2004
+        if not v.startswith("/") or v.endswith("/") or len(v) < 2:  # noqa: PLR2004 - "/x" is the shortest valid path
             raise ValueError("must start with '/', not end with '/', and not be '/' alone")
         return v
 
@@ -91,17 +93,81 @@ class StaticTokens(_Section):
     tokens: list[StaticToken] = Field(default_factory=list)
 
 
+ALLOWED_JWT_ALGORITHMS = ("RS256", "RS384", "RS512", "PS256", "ES256", "ES384")
+
+
+class Introspection(_Section):
+    """RFC 7662 introspection for opaque tokens (MPC001-057). Credentials come from environment variables."""
+
+    url: str
+    client_id_env: str | None = None
+    client_secret_env: str | None = None
+    cache_seconds: int = Field(default=300, ge=0, le=3600)
+
+
+class OAuth(_Section):
+    """This server as an OAuth 2.1 resource server (MPC001-057)."""
+
+    enabled: bool = False
+    issuer: str | None = Field(default=None, description="Expected `iss`; also advertised in metadata")
+    audience: str | None = Field(
+        default=None, description="This server's canonical resource URI; default http://host:port/path"
+    )
+    jwks_url: str | None = None
+    algorithms: list[str] = Field(default_factory=lambda: ["RS256", "ES256"])
+    leeway_seconds: int = Field(default=60, ge=0, le=300)
+    required_scopes: list[str] = Field(default_factory=list)
+    jwks_refresh_seconds: int = Field(default=60, ge=10)
+    introspection: Introspection | None = None
+    enforce_scopes: bool = Field(
+        default=True, description="Require webos.<module>.read/write scopes (MPC001-077)"
+    )
+
+    @field_validator("algorithms")
+    @classmethod
+    def _asymmetric_only(cls, v: list[str]) -> list[str]:
+        bad = [a for a in v if a not in ALLOWED_JWT_ALGORITHMS]
+        if bad or not v:
+            raise ValueError(
+                f"only asymmetric algorithms are allowed ({', '.join(ALLOWED_JWT_ALGORITHMS)}); "
+                f"got {bad or v}"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _complete(self) -> OAuth:
+        if self.enabled:
+            if not self.issuer:
+                raise ValueError("auth.oauth.issuer is required when OAuth is enabled")
+            if not self.jwks_url and self.introspection is None:
+                raise ValueError("auth.oauth needs jwks_url, introspection, or both")
+        return self
+
+
 class AuthSection(_Section):
     static_tokens: StaticTokens = StaticTokens()
+    oauth: OAuth = OAuth()
+
+    @model_validator(mode="after")
+    def _one_method(self) -> AuthSection:
+        if self.static_tokens.enabled and self.oauth.enabled:
+            raise ValueError("auth: enable static_tokens or oauth, not both")
+        return self
 
 
 class FeatureSection(_Section):
     resources: bool = False
     prompts: bool = False
+    tasks: bool = False  # MPC001-026 long-running tasks; refused until the task store exists
 
 
 class DataSection(_Section):
-    dbroot: Path | None = None
+    # MPC001-200: the webos datasource file; with it, every database path comes from the datasource locator.
+    datasources_file: Path | None = None
+    root: Path | None = None  # application root for relative paths in the datasource file; default: cwd
+    bootstrap_from_templates: bool = True
+    dbroot: Path | None = None  # overrides $(DBROOT), e.g. for a test tenant
+    state_dir: Path | None = Field(default=None, description="cerp's own SQLite stores (MPC001-166)")
     # datasource name -> database file; relative paths are under dbroot. Overrides the registry's map.
     datasources: dict[str, Path] = Field(default_factory=dict)
     busy_timeout_ms: int = Field(default=5000, ge=0)
@@ -120,6 +186,15 @@ class ExposureSection(_Section):
 class LimitsSection(_Section):
     max_page_size: int = Field(default=100, ge=1, le=1000)
     validation_budget_ms: int = Field(default=50, ge=1)
+    # MPC001-035 request limits (reloadable). Per principal = per bearer token; anonymous = per client IP.
+    max_header_bytes: int = Field(default=16 * 1024, ge=1024)
+    request_timeout_s: float = Field(default=30.0, gt=0)
+    concurrent_per_principal: int = Field(default=5, ge=1)
+    rate_per_second: float = Field(default=10.0, gt=0)
+    burst: int = Field(default=20, ge=1)
+    anonymous_concurrent: int = Field(default=2, ge=1)
+    anonymous_rate_per_second: float = Field(default=2.0, gt=0)
+    anonymous_burst: int = Field(default=5, ge=1)
 
 
 class LoggingSection(_Section):
@@ -127,6 +202,7 @@ class LoggingSection(_Section):
     file: Path | None = None
     max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     backups: int = Field(default=5, ge=0)
+    audit_file: Path | None = Field(default=None, description="JSON-lines audit trail (MPC001-110)")
 
 
 class Settings(_Section):
@@ -217,10 +293,22 @@ def _resolve_paths(s: Settings, base: Path) -> Settings:
 
     return s.model_copy(
         update={
-            "data": s.data.model_copy(update={"dbroot": fix(s.data.dbroot) or s.data.dbroot}),
+            "data": s.data.model_copy(
+                update={
+                    "dbroot": fix(s.data.dbroot) or s.data.dbroot,
+                    "datasources_file": fix(s.data.datasources_file) or s.data.datasources_file,
+                    "root": fix(s.data.root) or s.data.root,
+                    "state_dir": fix(s.data.state_dir) or s.data.state_dir,
+                }
+            ),
             "registry": s.registry.model_copy(update={"path": fix(s.registry.path) or s.registry.path}),
             "exposure": s.exposure.model_copy(update={"path": fix(s.exposure.path) or s.exposure.path}),
-            "logging": s.logging.model_copy(update={"file": fix(s.logging.file) or s.logging.file}),
+            "logging": s.logging.model_copy(
+                update={
+                    "file": fix(s.logging.file) or s.logging.file,
+                    "audit_file": fix(s.logging.audit_file) or s.logging.audit_file,
+                }
+            ),
         }
     )
 

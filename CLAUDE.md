@@ -5,16 +5,19 @@ personas (Bookkeeper, Stock Clerk, …) that work as back-office staff under hum
 
 ## Where the requirements are
 
-The requirements live in the Cortex repository, not here:
+The requirements live in this repository under `bugs/`:
 
-- `bugs/ai/MPC001/` — the server (protocol, transport, security, data binding, operation). Index: `MPC001/INDEX.md`.
-- `bugs/ai/MPC002/` — the persona layer (lifecycle, platform tools, approvals, queues, runner, triage).
-- `bugs/ai/PRD-MPC001.md`, `PRD-MPC002.md` — the product requirements both trace to.
-- `bugs/ai/archive/` — retired C++ (`cmpc`) material. Do not implement anything from it.
+- `bugs/MPC001/` — the server (protocol, transport, security, data binding, operation). Index: `bugs/MPC001/INDEX.md`.
+- `bugs/MPC002/` — the persona layer (lifecycle, platform tools, approvals, queues, runner, triage).
+- `bugs/PRD-MPC001.md`, `bugs/PRD-MPC002.md` — the product requirements both trace to. Overview: `bugs/INDEX.md`.
+- `bugs/archive/` — retired C++ (`cmpc`) material. Do not implement anything from it.
 
-On the development machine Cortex is at `G:\devel\cortex`. Read the ticket before implementing it and cite its id
-(e.g. `MPC001-061`) in commit messages, PR titles and module docstrings. If code and a ticket disagree, ask; do
-not silently change either.
+Read the ticket before implementing it and cite its id (e.g. `MPC001-061`) in commit messages, PR titles and module
+docstrings. If code and a ticket disagree, ask; do not silently change either. Tickets name source files in the
+Cortex repository (`code/...`, `docs/...`, `bugs/kernel/...`); on the development machine Cortex is at
+`G:\devel\cortex`.
+
+Template webos databases are in `data/template/` (one `.s3db` per module: empty schemas, plus reference rows in `cfm`, `im` and `bi`). They are the starting point for test tenants and new installs. Never open them for writing or point the server at them: copy them first. They are in rollback-journal mode, not WAL.
 
 The webos application (models, manifests, WSIDL) is at `G:\cluster\wwwroot\portal`; the persona specs and packaged
 skills are in Cortex at `docs/webos/office/specs/`.
@@ -28,6 +31,8 @@ uv run ruff check . && uv run ruff format --check .
 uv run mypy                  # strict
 uv run lint-imports          # layer contract (MPC001-005)
 uv run cerp --help
+uv run cerp config check --config config/cerp.local.yaml
+uv run cerp registry generate --portal … --datasources … --dbroot … --out var/registry/webos.yaml
 ```
 
 Always run all four checks before saying a change is done. Use `uv add` / `uv add --dev` to change dependencies so
@@ -48,7 +53,7 @@ Always run all four checks before saying a change is done. Use `uv add` / `uv ad
 
 Key choices: Python ≥ 3.13 with uv; official MCP Python SDK (`mcp`, `MCPServer`) over Streamable HTTP and stdio;
 direct SQLite access to the webos databases through the generated model registry; OAuth only (no HMAC); the persona
-runner uses the Claude Agent SDK (`claude-agent-sdk`, optional extra `runner`). See `docs/decisions/0001-python-baseline.md`.
+runner uses the Claude Agent SDK (`claude-agent-sdk`, optional extra `runner`). See `docs/webos/decisions/0001-python-baseline.md`.
 
 ## Rules that are easy to break
 
@@ -62,7 +67,30 @@ runner uses the Claude Agent SDK (`claude-agent-sdk`, optional extra `runner`). 
 - **Errors** to clients carry a correlation id, never tracebacks, SQL or paths (MPC001-067).
 - Code must run on Windows and Linux: use `pathlib`, no shell-specific commands in the package.
 
+## Where things are
+
+| Concern | Module |
+|---|---|
+| Configuration (YAML + `CERP__…` env), reload | `cerp.app.config` |
+| JSON logging, redaction | `cerp.app.logs` |
+| Server assembly, startup checks | `cerp.app.server`; ASGI app `cerp.app.asgi` |
+| Error types and the code table | `cerp.protocol.errors` |
+| Tool exception boundary (`@guarded`), request middleware | `cerp.protocol.boundary` |
+| Tool names, catalogue version | `cerp.protocol.naming` |
+| Bounded JSON Schema validation | `cerp.protocol.schema` |
+| Static development tokens | `cerp.auth.static` |
+| SQLite connections (`reader`/`writer`) | `cerp.data.sqlite` |
+| Registry loader, table-name rule | `cerp.data.registry`; generator `cerp.registry.generate` (never imported by the server) |
+| Exposure file | `cerp.data.exposure` |
+| Handles, record conventions | `cerp.data.handles`, `cerp.data.records` |
+
+Every tool function is wrapped in `@guarded` and raises the `cerp.protocol.errors` types for business failures.
+`tests/test_guardrails.py` fails the build on `DELETE` statements or string-built SQL under `src/cerp/tools/`.
+The SDK coverage map (`docs/coverage-map.md`) must be updated with any SDK upgrade.
+
 ## Tests
 
 pytest, with Hypothesis for parsers and validators. Test the server in-process with `mcp.Client(build_server())`.
-Never point tests at real business databases; use fixtures built by the tenant seed script (MPC001-150) once it exists.
+Never point tests at real business databases. Tests copy `data/template/*.s3db` to a temporary folder
+(`dbroot` fixture) and generate a registry from the small webos sample in `tests/fixtures/webos/`; the tenant seed
+script (MPC001-150) will replace this once it exists.
