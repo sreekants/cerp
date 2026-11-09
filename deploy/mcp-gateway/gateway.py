@@ -1,11 +1,11 @@
 """One process, one port: the four read-only prototype MCP servers behind a single Streamable HTTP endpoint.
 
-    /mcp/im   /mcp/pm   /mcp/crm   /mcp/cfm      (each a full MCP endpoint)
+    <prefix>/im   <prefix>/pm   <prefix>/crm   <prefix>/cfm   (each a full MCP endpoint; prefix default /mcp)
 
 Binds loopback only; nginx terminates TLS and checks the bearer token. Databases come from
 MCP_DB_DIR (default: ./db next to this file), one <name>.s3db per server, opened read-only.
 
-    uv run --directory <cerp> python deploy/mcp-gateway/gateway.py [--port 7410]
+    uv run --directory <cerp> python deploy/mcp-gateway/gateway.py [--port 7410] [--prefix /mcp/webos]
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def load(name: str):
     return mod
 
 
-def build(db_dir: Path, host: str):
+def build(db_dir: Path, host: str, prefix: str = "/mcp"):
     servers = {}
     for name in NAMES:
         db = db_dir / f"{name}.s3db"
@@ -51,11 +51,11 @@ def build(db_dir: Path, host: str):
                 await stack.enter_async_context(s.session_manager.run())
             yield
 
-    inner = Starlette(routes=[Mount(f"/mcp/{n}", app=a) for n, a in apps.items()], lifespan=lifespan)
-    bare = {f"/mcp/{n}" for n in NAMES}
+    inner = Starlette(routes=[Mount(f"{prefix}/{n}", app=a) for n, a in apps.items()], lifespan=lifespan)
+    bare = {f"{prefix}/{n}" for n in NAMES}
 
     async def app(scope, receive, send):
-        # /mcp/im and /mcp/im/ are the same endpoint: no redirect, whose Location would name the loopback host.
+        # <prefix>/im and <prefix>/im/ are the same endpoint: no redirect, whose Location would name the loopback host.
         if scope["type"] == "http" and scope["path"] in bare:
             scope = dict(scope, path=scope["path"] + "/", raw_path=(scope["path"] + "/").encode())
         await inner(scope, receive, send)
@@ -67,9 +67,10 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=7410)
+    p.add_argument("--prefix", default="/mcp", help="URL path the endpoints sit under")
     p.add_argument("--db-dir", type=Path, default=Path(os.environ.get("MCP_DB_DIR", HERE / "db")))
     a = p.parse_args()
-    uvicorn.run(build(a.db_dir, a.host), host=a.host, port=a.port, log_level="info")
+    uvicorn.run(build(a.db_dir, a.host, a.prefix.rstrip("/")), host=a.host, port=a.port, log_level="info")
 
 
 if __name__ == "__main__":

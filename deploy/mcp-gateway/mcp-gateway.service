@@ -3,7 +3,7 @@
 #          sudo systemctl enable --now mcp-gateway
 
 [Unit]
-Description=cerp prototype MCP gateway (im, pm, crm, cfm on 127.0.0.1:7410)
+Description=cerp prototype MCP gateway (im, pm, crm, cfm on 127.0.0.1:7410, under /mcp/webos)
 After=network-online.target
 Wants=network-online.target
 
@@ -12,7 +12,7 @@ Type=exec
 User=ec2-user
 WorkingDirectory=/home/ec2-user/projects/cerp
 Environment=MCP_DB_DIR=/home/ec2-user/projects/cerp/deploy/mcp-gateway/db
-ExecStart=/home/ec2-user/projects/cerp/.venv/bin/python deploy/mcp-gateway/gateway.py --port 7410
+ExecStart=/home/ec2-user/projects/cerp/.venv/bin/python deploy/mcp-gateway/gateway.py --port 7410 --prefix /mcp/webos
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes
