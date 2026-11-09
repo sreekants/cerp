@@ -40,10 +40,14 @@ READER_RIGHTS: Final = (
     "TodoList.View", "TodoListItem.View", "TimeTrack.View", "Expense.View",
 )  # fmt: skip
 
+EDITOR_RIGHTS: Final = (
+    "TodoList.Add", "TodoList.Edit", "TodoList.Delete", "TodoListItem.Add", "TodoListItem.Edit",
+)  # fmt: skip
+
 # user id, login, first, last, enabled, groups
 USERS: Final = (
     (1, "admin", "Ada", "Admin", 1, (1,)),
-    (2, "alice", "Alice", "Andersen", 1, (10,)),
+    (2, "alice", "Alice", "Andersen", 1, (10, 12)),  # 12: may write to-do lists (decision 0003)
     (3, "bob", "Bob", "Berg", "Y", (11,)),  # 'Y' as in the webos template: enabled
     (4, "carol", "Carol", "Carlsen", 0, (10,)),  # disabled
     (5, "nobody", "No", "Rights", 1, ()),
@@ -53,6 +57,7 @@ GROUPS: Final = {
     10: ("Readers", READER_RIGHTS),
     # Project.View only, plus a right whose name merely starts with Account.View (WOS-BUG-035 trap)
     11: ("Projects", ("Project.View", "Account.ViewAll", "TodoListItem.View", "TodoList.View")),
+    12: ("Task editors", EDITOR_RIGHTS),
 }
 
 

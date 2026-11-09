@@ -1,4 +1,4 @@
-"""Curated read-only tool packs and their startup checks (MPC001-088).
+"""Curated tool packs and their startup checks (MPC001-088; write packs: decision 0003).
 
 A pack is enabled in configuration (``tools.packs``). Before any tool is registered, every pack's
 declared tables and columns are checked against the live databases and every guard against the registry;
@@ -21,7 +21,7 @@ from cerp.data.sqlite import Databases
 from cerp.protocol.cursors import CursorSigner
 from cerp.protocol.killswitch import KillSwitch
 from cerp.protocol.scopes import ScopePolicy
-from cerp.tools import crm, personal, pm
+from cerp.tools import crm, personal, personal_write, pm, pm_write
 from cerp.tools.context import Guard, Reads, Registrar, ToolContext, check_reads
 
 PackRegister = Callable[[Registrar, ToolContext], None]
@@ -33,6 +33,9 @@ PACKS: Final[dict[str, tuple[PackRegister, Reads, tuple[Guard, ...]]]] = {
         personal.READS,
         (pm.TASK, pm.MILESTONE, crm.TICKET, crm.REMINDER, crm.ACTIVITY),
     ),
+    # Write packs (decision 0003): off unless named, so a read-only deployment stays read-only.
+    "pm_write": (pm_write.register, pm_write.READS, pm_write.GUARDS),
+    "personal_write": (personal_write.register, personal_write.READS, ()),
 }
 
 

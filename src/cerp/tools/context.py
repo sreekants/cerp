@@ -8,7 +8,8 @@ A :class:`ToolContext` gives a tool everything it may use, and nothing else:
   with no model of their own) an explicit privilege name;
 * :meth:`rows` runs a **constant** SQL statement with bound values on a read-only connection
   (MPC001-162, MPC001-065) and cleans webos's literal ``'NULL'`` strings (MPC001-163);
-* :meth:`offset` / :meth:`next_cursor` implement signed cursor paging (MPC001-023).
+* :meth:`offset` / :meth:`next_cursor` implement signed cursor paging (MPC001-023);
+* :meth:`writer` opens a short write transaction (MPC001-162) for the curated write tools (decision 0003).
 
 Each tool pack declares the tables and columns it reads (:data:`Reads`); :func:`check_reads` verifies them
 against the live databases at startup, so a renamed column stops the server instead of failing a call.
@@ -18,7 +19,8 @@ from __future__ import annotations
 
 import datetime as dt
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final
 
@@ -46,6 +48,15 @@ MAX_PAGE: Final = 100
 READ_ONLY: Final = ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
 )
+
+WRITE: Final = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False
+)
+"""A curated write that adds or changes records; deletes are soft (status -1) and reversible."""
+IDEMPOTENT_WRITE: Final = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+)
+"""A curated write that sets a value: calling it twice leaves the same result."""
 
 DateText = Annotated[str, StringConstraints(max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$")]
 """A calendar date, ``YYYY-MM-DD``."""
@@ -94,20 +105,22 @@ def record_id(text: str, module: str, model: str, field: str) -> int:
 
 @dataclass(frozen=True)
 class Registrar:
-    """Registers read-only tools with the kill switch and scope policy in force (MPC001-116, -077)."""
+    """Registers tools with the kill switch and scope policy in force (MPC001-116, -077)."""
 
     mcp: MCPServer
     killswitch: KillSwitch
     scopes: ScopePolicy
     names: list[str] = field(default_factory=list)
 
-    def __call__(self, fn: Callable[..., Any], name: str, title: str) -> None:
+    def __call__(
+        self, fn: Callable[..., Any], name: str, title: str, annotations: ToolAnnotations = READ_ONLY
+    ) -> None:
         register_tool(
             self.mcp,
             fn,
             name=name,
             title=title,
-            annotations=READ_ONLY,
+            annotations=annotations,
             killswitch=self.killswitch,
             scopes=self.scopes,
         )
@@ -191,6 +204,11 @@ class ToolContext:
         if not self.allowed(caller, guard, verb):
             raise NotPermitted(f"you do not have the right to read {guard.label}")
 
+    def require_to(self, caller: Caller, guard: Guard, verb: str, action: str) -> None:
+        """For a write: raise :class:`NotPermitted` unless ``verb`` is allowed (``action`` names it)."""
+        if not self.allowed(caller, guard, verb):
+            raise NotPermitted(f"you do not have the right to {action}")
+
     def require_record(self, caller: Caller, guard: Guard, what: str) -> None:
         """For a single record, a missing right looks exactly like a missing record (MPC001-087)."""
         if not self.allowed(caller, guard):
@@ -203,6 +221,12 @@ class ToolContext:
     ) -> list[dict[str, Any]]:
         with self.databases.reader(datasource) as con:
             return [clean_row(dict(r)) for r in con.execute(statement, params).fetchall()]
+
+    @contextmanager
+    def writer(self, datasource: str) -> Iterator[sqlite3.Connection]:
+        """A short write transaction (``BEGIN IMMEDIATE`` … ``COMMIT``); never ``await`` inside it."""
+        with self.databases.writer(datasource) as con:
+            yield con
 
     def one(
         self, datasource: str, statement: str, params: Mapping[str, Any] | tuple[Any, ...] = ()

@@ -220,11 +220,12 @@ class LimitsSection(_Section):
     anonymous_burst: int = Field(default=5, ge=1)
 
 
-ToolPack = Literal["pm", "crm", "personal"]
+ToolPack = Literal["pm", "crm", "personal", "pm_write", "personal_write"]
 
 
 class ToolsSection(_Section):
-    # MPC001-088: curated read-only tool packs to register. They need a registry and the security database.
+    # MPC001-088: curated tool packs to register; the *_write packs add write tools (decision 0003).
+    # They need a registry and the security database.
     packs: list[ToolPack] = Field(default_factory=list)
     cursor_ttl_seconds: int = Field(default=900, ge=60, le=86400)  # MPC001-023
 
