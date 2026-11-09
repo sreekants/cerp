@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar, Token
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -24,6 +25,26 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 
 audit_log = logging.getLogger("cerp.audit")
 CLIENT_INFO_KEY = "io.modelcontextprotocol/clientInfo"
+
+# The webos user a call was mapped to (MPC001-060). A mutable holder, so a tool running in a worker
+# thread can fill it in for the middleware that opened it.
+_MAPPED_USER: ContextVar[list[str] | None] = ContextVar("cerp_mapped_user", default=None)
+
+
+def open_call() -> Token[list[str] | None]:
+    """Start recording the mapped webos user for one request; pass the result to :func:`close_call`."""
+    return _MAPPED_USER.set([])
+
+
+def close_call(token: Token[list[str] | None]) -> None:
+    _MAPPED_USER.reset(token)
+
+
+def note_webos_user(name: str) -> None:
+    """Record the webos user the current call acts as (called by principal mapping)."""
+    holder = _MAPPED_USER.get()
+    if holder is not None:
+        holder[:] = [name]
 
 
 @dataclass(frozen=True)
@@ -96,13 +117,15 @@ def build_record(
 ) -> AuditRecord:
     token = get_access_token()
     name, version = client_info(params, session)
+    mapped = _MAPPED_USER.get()
     return AuditRecord(
         ts=dt.datetime.now(dt.UTC).isoformat(timespec="milliseconds"),
         correlation_id=correlation_id,
         trace_id=trace_id,
         principal=token.subject if token else None,
         client_id=token.client_id if token else None,
-        webos_user=token.subject if token else None,  # principal mapping (MPC001-060) refines this
+        # the mapped webos user (MPC001-060) when a tool resolved one, else the token subject
+        webos_user=mapped[0] if mapped else (token.subject if token else None),
         client_name=name,
         client_version=version,
         tool=str((params or {}).get("name", "")),

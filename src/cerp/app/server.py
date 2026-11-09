@@ -8,9 +8,10 @@ the registry and the live schema; register tools; log one summary line. Any fail
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,7 +32,9 @@ from cerp.protocol.boundary import RequestMiddleware
 from cerp.protocol.killswitch import KillSwitch
 from cerp.protocol.naming import TOOL_CATALOGUE_VERSION, check_unique
 from cerp.protocol.scopes import NO_SCOPES, ScopePolicy
+from cerp.tools.context import ToolContext
 from cerp.tools.describe import describe_tool_names, register_describe_tools
+from cerp.tools.packs import PackError, build_context, register_packs
 
 log = logging.getLogger("cerp.app")
 
@@ -58,6 +61,7 @@ class Runtime:
     exposure_tools: list[str] = field(default_factory=list)
     scopes: ScopePolicy = NO_SCOPES
     unavailable: list[str] = field(default_factory=list)  # datasources with no file and no template
+    tool_context: ToolContext | None = None  # curated tool packs (MPC001-088)
 
     def needed_databases(self) -> list[str]:
         """Datasources that exposed models read or write."""
@@ -178,12 +182,17 @@ def _locate(settings: Settings, environ: Mapping[str, str], rt: Runtime) -> dict
             environ,
             root=d.root,
             overrides={"DBROOT": str(d.dbroot)} if d.dbroot is not None else None,
+            strict=d.strict_datasources,
         )
     except DatasourceError as exc:
         raise ConfigError([f"data.datasources_file: {e}" for e in exc.errors]) from None
     report = locator.bootstrap(enabled=d.bootstrap_from_templates)
-    rt.unavailable = list(report.unavailable)
-    if not d.bootstrap_from_templates and report.unavailable:
+    rt.unavailable = sorted({*report.unavailable, *locator.unresolved})
+    if locator.unresolved:
+        log.warning(
+            "datasources not resolvable here (unavailable): %s", ", ".join(sorted(locator.unresolved))
+        )
+    if d.strict_datasources and not d.bootstrap_from_templates and report.unavailable:
         raise ConfigError(
             [
                 f"datasource {n}: {locator.path(n)} is missing and bootstrap is disabled"
@@ -248,10 +257,34 @@ def _data(settings: Settings, rt: Runtime, environ: Mapping[str, str]) -> None:
         rt.exposure = load_exposure(settings.exposure.path, rt.registry, live)
 
 
+def _packs(mcp: MCPServer, rt: Runtime, clock: Callable[[], dt.datetime] | None) -> list[str]:
+    """Register the curated read-only tool packs (MPC001-088) after checking what they need."""
+    s = rt.settings
+    if rt.registry is None or rt.databases is None:
+        raise ConfigError(["tools.packs: curated tools need registry.path and the webos databases"])
+    assert rt.killswitch is not None  # noqa: S101 - set before tools are registered
+    rt.tool_context = build_context(
+        rt.databases,
+        rt.registry,
+        {(p.issuer, p.subject): p.user for p in s.auth.principals},
+        local_user=s.auth.local_user,
+        cursor_ttl=s.tools.cursor_ttl_seconds,
+        clock=clock,
+    )
+    try:
+        names = register_packs(mcp, rt.tool_context, s.tools.packs, rt.killswitch, rt.scopes)
+    except PackError as exc:
+        raise StartupError(str(exc)) from None
+    log.info("tool packs %s: %d tools", ",".join(s.tools.packs), len(names))
+    return names
+
+
 def build_runtime(
     settings: Settings | None = None,
     environ: Mapping[str, str] | None = None,
     store: ConfigStore | None = None,
+    *,
+    clock: Callable[[], dt.datetime] | None = None,
 ) -> tuple[MCPServer, Runtime]:
     """Build the server. ``store`` supplies live, reloadable settings (kill switches); default: fixed."""
     settings = settings or (store.current if store else Settings())
@@ -280,6 +313,8 @@ def build_runtime(
     if rt.exposure is not None:
         rt.exposure_tools = register_describe_tools(mcp, rt.exposure, killswitch, rt.scopes)
         rt.tool_names += rt.exposure_tools
+    if settings.tools.packs:
+        rt.tool_names += _packs(mcp, rt, clock)
     check_unique(rt.tool_names)
     log.info(
         "cerp %s ready: tool catalogue v%d, %d tools, protocol %s, auth %s",

@@ -27,7 +27,7 @@ from mcp_types import CallToolResult, TextContent
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from cerp.protocol import correlation
-from cerp.protocol.audit import AuditSink, build_record, log_sink
+from cerp.protocol.audit import AuditSink, build_record, close_call, log_sink, open_call
 from cerp.protocol.errors import INTERNAL_ERROR, Busy, DomainError
 from cerp.protocol.killswitch import NO_SWITCHES, KillSwitch
 
@@ -184,6 +184,7 @@ class RequestMiddleware:
         cid = correlation.new_correlation_id()
         token = correlation.bind(cid)
         trace_token = correlation.bind_trace(correlation.parse_traceparent(_traceparent(ctx)))
+        call_token = open_call()
         started = time.perf_counter()
         name = ctx.params.get("name") if ctx.params and ctx.method == "tools/call" else None
         outcome = "ok"
@@ -227,5 +228,6 @@ class RequestMiddleware:
                     outcome,
                     (time.perf_counter() - started) * 1000,
                 )
+            close_call(call_token)
             correlation.reset_trace(trace_token)
             correlation.reset(token)

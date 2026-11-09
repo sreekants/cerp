@@ -24,7 +24,7 @@ from starlette.routing import BaseRoute, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from cerp import __version__
-from cerp.app.config import ConfigStore, LimitsSection, Settings
+from cerp.app.config import ConfigError, ConfigStore, LimitsSection, Settings
 from cerp.app.errorbody import CorrelateErrors
 from cerp.app.jsonlimits import JsonLimits
 from cerp.app.limits import RequestLimits
@@ -109,6 +109,10 @@ def build_app(
     environ: Mapping[str, str] | None = None,
     store: ConfigStore | None = None,
 ) -> tuple[Starlette, MCPServer, Runtime]:
+    current = settings or (store.current if store else None)
+    if current is not None and current.auth.local_user is not None:
+        # MPC001-168: the local user is for a stdio client on this machine, never for network callers.
+        raise ConfigError(["auth.local_user: only allowed with `cerp stdio`, not over HTTP"])
     mcp, rt = build_runtime(settings, environ, store)
     s = rt.settings
     app = mcp.streamable_http_app(

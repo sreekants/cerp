@@ -132,6 +132,8 @@ def test_enabling_unimplemented_features_fails_startup() -> None:
 
     with pytest.raises(ConfigError, match=r"features\.resources"):
         build_server(Settings.model_validate({"features": {"resources": True}}))
+    with pytest.raises(ConfigError, match=r"features\.tasks"):
+        build_server(Settings.model_validate({"features": {"tasks": True}}))
 
 
 # ---------------------------------------------------------------- endpoint (MPC001-030) and routing (-032)

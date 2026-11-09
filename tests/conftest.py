@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,19 @@ def dbroot(tmp_path: Path) -> Path:
     for f in TEMPLATES.glob("*.s3db"):
         shutil.copy2(f, out / f.name)
     return out
+
+
+def seed_tickets(dbroot: Path, count: int = 2) -> None:
+    """Insert test tickets into the private copy: templates may ship with empty tables."""
+    con = sqlite3.connect(dbroot / "im.s3db")
+    try:
+        con.executemany(
+            "INSERT INTO tickets (short_name, status, priority) VALUES (?, 1000, 5)",
+            [(f"test ticket {i}",) for i in range(count)],
+        )
+        con.commit()
+    finally:
+        con.close()
 
 
 @pytest.fixture

@@ -151,15 +151,18 @@ class DatasourceLocator:
         *,
         root: Path | None = None,
         overrides: Mapping[str, str] | None = None,
+        strict: bool = True,
     ) -> DatasourceLocator:
         """Read and validate ``datasources.xml``.
 
-        ``overrides`` replace ``<Environment>`` values, e.g. ``DBROOT`` for a test tenant.
+        ``overrides`` replace ``<Environment>`` values, e.g. ``DBROOT`` for a test tenant. With
+        ``strict=False`` a datasource whose variables cannot be resolved is listed in :attr:`unresolved`
+        instead of failing the whole file (an installation-wide map serves other applications too).
         """
         env = os.environ if environ is None else environ
         raw, variables, skipped = read_datasource_file(path)
         variables.update(overrides or {})
-        return cls(raw, variables, root or Path.cwd(), env, skipped)
+        return cls(raw, variables, root or Path.cwd(), env, skipped, strict=strict)
 
     def names(self) -> list[str]:
         return sorted(self._paths)

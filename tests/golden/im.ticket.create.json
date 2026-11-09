@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "creation_time": {
+      "format": "date-time",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "owner": {
+      "maxLength": 128,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "priority": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "severity": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "short_name": {
+      "maxLength": 80,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "description": "1000 Open, 2000 Fixed, 3000 Reviewed, 4000 Tested, 5000 Closed",
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "type": "object"
+}

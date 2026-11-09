@@ -144,14 +144,34 @@ class OAuth(_Section):
         return self
 
 
+class PrincipalMap(_Section):
+    """One OAuth principal (issuer + subject) mapped to one webos user (MPC001-060)."""
+
+    issuer: str = Field(min_length=1, description="Token issuer (the `iss` claim)")
+    subject: str = Field(min_length=1, description="Token subject (the `sub` claim)")
+    user: str = Field(min_length=1, description="webos user name in security.users")
+
+
 class AuthSection(_Section):
     static_tokens: StaticTokens = StaticTokens()
     oauth: OAuth = OAuth()
+    # MPC001-060: OAuth principals -> webos users. Static tokens name their user directly.
+    principals: list[PrincipalMap] = Field(default_factory=list)
+    # MPC001-168 (interim): the webos user a local stdio client acts as. Refused with HTTP authentication,
+    # and the HTTP app refuses to start while it is set, so it can never apply to a network caller.
+    local_user: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def _one_method(self) -> AuthSection:
         if self.static_tokens.enabled and self.oauth.enabled:
             raise ValueError("auth: enable static_tokens or oauth, not both")
+        if self.local_user is not None and (self.static_tokens.enabled or self.oauth.enabled):
+            raise ValueError("auth.local_user is for stdio only and cannot be combined with HTTP auth")
+        seen: set[tuple[str, str]] = set()
+        for p in self.principals:
+            if (p.issuer, p.subject) in seen:
+                raise ValueError(f"auth.principals: {p.issuer} {p.subject} is mapped twice")
+            seen.add((p.issuer, p.subject))
         return self
 
 
@@ -166,6 +186,9 @@ class DataSection(_Section):
     datasources_file: Path | None = None
     root: Path | None = None  # application root for relative paths in the datasource file; default: cwd
     bootstrap_from_templates: bool = True
+    # False: datasources that cannot be resolved, or are missing with bootstrap off, are unavailable
+    # instead of fatal; startup still fails if an exposed model or a tool pack needs one (MPC001-200).
+    strict_datasources: bool = True
     dbroot: Path | None = None  # overrides $(DBROOT), e.g. for a test tenant
     state_dir: Path | None = Field(default=None, description="cerp's own SQLite stores (MPC001-166)")
     # datasource name -> database file; relative paths are under dbroot. Overrides the registry's map.
@@ -197,6 +220,15 @@ class LimitsSection(_Section):
     anonymous_burst: int = Field(default=5, ge=1)
 
 
+ToolPack = Literal["pm", "crm", "personal"]
+
+
+class ToolsSection(_Section):
+    # MPC001-088: curated read-only tool packs to register. They need a registry and the security database.
+    packs: list[ToolPack] = Field(default_factory=list)
+    cursor_ttl_seconds: int = Field(default=900, ge=60, le=86400)  # MPC001-023
+
+
 class LoggingSection(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     file: Path | None = None
@@ -215,6 +247,7 @@ class Settings(_Section):
     exposure: ExposureSection = ExposureSection()
     limits: LimitsSection = LimitsSection()
     kill_switches: dict[str, bool] = Field(default_factory=dict)
+    tools: ToolsSection = ToolsSection()
     logging: LoggingSection = LoggingSection()
 
     @model_validator(mode="after")

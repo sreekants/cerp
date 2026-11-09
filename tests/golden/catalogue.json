@@ -1,0 +1,115 @@
+{
+  "catalogue_version": 1,
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Describe the fields of im:ticket records: A customer or internal support ticket.",
+      "input_schema": {
+        "properties": {},
+        "title": "describe_modelArguments",
+        "type": "object"
+      },
+      "kill_switches": [
+        "tool:im.describe_ticket",
+        "module:im"
+      ],
+      "name": "im.describe_ticket",
+      "output_schema": {
+        "$defs": {
+          "FieldInfo": {
+            "properties": {
+              "description": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Description"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "required": {
+                "title": "Required",
+                "type": "boolean"
+              },
+              "type": {
+                "title": "Type",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "type",
+              "required"
+            ],
+            "title": "FieldInfo",
+            "type": "object"
+          }
+        },
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/$defs/FieldInfo"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "handle_format": {
+            "title": "Handle Format",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "module": {
+            "title": "Module",
+            "type": "string"
+          },
+          "sortable": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sortable",
+            "type": "array"
+          },
+          "verbs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Verbs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "module",
+          "model",
+          "description",
+          "handle_format",
+          "verbs",
+          "sortable",
+          "fields"
+        ],
+        "title": "ModelDescription",
+        "type": "object"
+      },
+      "scope": "webos.im.read",
+      "title": "Describe ticket"
+    }
+  ]
+}

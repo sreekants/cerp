@@ -12,6 +12,7 @@ from cerp.data.handles import Handle, HandleError
 from cerp.data.records import clean_row, concurrency_token, deleted_rule, insert_values, visible_clause
 from cerp.data.registry import load_registry
 from cerp.data.sqlite import Databases
+from tests.conftest import seed_tickets
 
 
 def test_handle_round_trip() -> None:
@@ -61,6 +62,7 @@ def test_soft_delete_rules(registry_file: Path) -> None:
 
 
 def test_soft_deleted_rows_disappear_from_reads(registry_file: Path, dbroot: Path) -> None:
+    seed_tickets(dbroot)
     reg = load_registry(registry_file)
     model = reg.models["objects/support/ticket"]
     dbs = Databases(reg.database_files(dbroot))

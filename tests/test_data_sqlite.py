@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from cerp.data.sqlite import Databases, DbOptions
+from tests.conftest import seed_tickets
 
 
 def _dbs(dbroot: Path, **opts: int) -> Databases:
@@ -25,6 +26,7 @@ def test_reader_cannot_write_even_if_code_tries(dbroot: Path) -> None:
 
 
 def test_writer_commits_and_rolls_back(dbroot: Path) -> None:
+    seed_tickets(dbroot)
     dbs = _dbs(dbroot)
     with dbs.reader("im") as con:
         before = con.execute("SELECT priority FROM tickets ORDER BY id LIMIT 1").fetchone()[0]

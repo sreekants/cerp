@@ -58,6 +58,9 @@ default-groups = ["dev"]
 line-length = 110
 target-version = "py313"
 src = ["src", "tests"]
+# docs/ holds copies of the Cortex webos documentation (code blocks, helper scripts); they are kept
+# identical to Cortex rather than reformatted here.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 # S = flake8-bandit (MPC001-008: no eval/exec/pickle/shell=True/SQL by formatting)

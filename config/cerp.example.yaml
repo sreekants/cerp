@@ -33,6 +33,13 @@ auth:
     #   url: https://login.example.com/realms/acme/protocol/openid-connect/token/introspect
     #   client_id_env: CERP_INTROSPECTION_ID
     #   client_secret_env: CERP_INTROSPECTION_SECRET
+  principals: []         # OAuth issuer + subject -> webos user (MPC001-060), e.g.
+  #   - {issuer: "https://login.example.com/realms/acme", subject: "3f2a…", user: alice}
+  # local_user: alice    # stdio only (`cerp stdio`): the webos user a local client acts as (MPC001-168)
+
+tools:
+  packs: []              # read-only decision-support tools: [pm, crm, personal] (MPC001-088)
+  cursor_ttl_seconds: 900
 
 kill_switches: {}        # e.g. {writes: true, "module:crm": true, "tool:im.create_ticket": true} (MPC001-116)
 
