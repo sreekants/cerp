@@ -1,6 +1,7 @@
 """MPC001-169 / MPC001-207 guardrail lint for every tool module (im, pm, dms, personal, ...).
 
-* no DELETE and no string-built SQL in tool code (MPC001-169);
+* no DELETE and no string-built SQL in tool code (MPC001-169); the one exception is the project-link
+  ``DELETE`` in ``crm_write.py`` (decision 0004), allowed as that exact statement in that file only;
 * no tool parameter that takes raw SQL or a free-form filter, and no owner parameter: the owner always
   comes from the mapped user (MPC001-207).
 
@@ -21,6 +22,11 @@ import pytest
 TOOLS = Path(__file__).resolve().parents[1] / "src" / "cerp" / "tools"
 _SQL = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|REPLACE|WHERE|VALUES)\b", re.I)
 _DELETE = re.compile(r"\bDELETE\s+FROM\b", re.I)
+# Decision 0004: unlinking a contact from a project removes its project_contacts row (no status column,
+# AUTOINCREMENT ids are never reused). Exactly this statement, in exactly this file.
+ALLOWED_DELETES: dict[str, frozenset[str]] = {
+    "crm_write.py": frozenset({"DELETE FROM project_contacts WHERE project_id = ? AND contact_id = ?"}),
+}
 
 
 def _literals(node: ast.AST) -> list[str]:
@@ -43,7 +49,12 @@ def violations(source: str, filename: str = "<src>") -> list[str]:
                 for a in args
                 if a.arg.lower() in _FORBIDDEN_PARAMS
             ]
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and _DELETE.search(node.value):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and _DELETE.search(node.value)
+            and " ".join(node.value.split()) not in ALLOWED_DELETES.get(Path(filename).name, frozenset())
+        ):
             found.append(f"{filename}:{node.lineno}: DELETE statement")
         built = (
             isinstance(node, ast.JoinedStr)
@@ -81,6 +92,16 @@ def test_tool_code_has_no_delete_or_built_sql() -> None:
 )
 def test_lint_catches_bad_code(bad: str) -> None:
     assert violations(bad)
+
+
+def test_only_the_project_link_delete_is_allowed() -> None:
+    allowed = 'S = "DELETE FROM project_contacts WHERE project_id = ? AND contact_id = ?"'
+    assert violations(allowed, "src/cerp/tools/crm_write.py") == []
+    assert violations(allowed, "src/cerp/tools/crm.py")  # any other file
+    assert violations(
+        'S = "DELETE FROM project_contacts WHERE contact_id = ?"', "src/cerp/tools/crm_write.py"
+    )
+    assert violations('S = "DELETE FROM contacts WHERE id = ?"', "src/cerp/tools/crm_write.py")
 
 
 def test_lint_allows_bound_parameters() -> None:

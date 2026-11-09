@@ -220,7 +220,7 @@ def _check_assignee(ctx: ToolContext, caller: Caller, user_id: int | None, perso
             "a task in a personal list can be assigned only to its owner", field="assigned_to"
         )
     try:
-        user = ctx.directory.user_by_id(user_id)
+        user = ctx.users().user_by_id(user_id)
     except SecurityUnavailable:
         raise ValidationError("the user directory is unavailable", field="assigned_to") from None
     if user is None:

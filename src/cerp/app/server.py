@@ -22,8 +22,10 @@ from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSI
 from cerp import __version__
 from cerp.app.config import ConfigError, ConfigStore, Settings
 from cerp.auth.oauth import IntrospectionConfig, OAuthConfig, OAuthVerifier
+from cerp.auth.osession import DispatchingVerifier, OSessionVerifier
 from cerp.auth.static import StaticTokenSpec, StaticTokenVerifier, assert_loopback
 from cerp.data.datasources import DatasourceError, DatasourceLocator
+from cerp.data.domains import DomainDirectory
 from cerp.data.exposure import Exposure, load_exposure
 from cerp.data.registry import Registry, load_registry
 from cerp.data.sqlite import Databases, DbOptions
@@ -62,6 +64,7 @@ class Runtime:
     scopes: ScopePolicy = NO_SCOPES
     unavailable: list[str] = field(default_factory=list)  # datasources with no file and no template
     tool_context: ToolContext | None = None  # curated tool packs (MPC001-088)
+    domains: DomainDirectory | None = None  # webos domains for OSESSION callers (MPC001-286)
 
     def needed_databases(self) -> list[str]:
         """Datasources that exposed models read or write."""
@@ -116,6 +119,32 @@ def _check_features(settings: Settings) -> None:
 
 
 def _auth(
+    settings: Settings, environ: Mapping[str, str]
+) -> tuple[StaticTokenVerifier | OAuthVerifier | None, AuthSettings | None, DomainDirectory | None]:
+    """The configured verifier and auth settings, and the domain directory when OSESSION is on.
+
+    With ``auth.osession`` (MPC001-286), the server's verifier is a :class:`DispatchingVerifier`: bearers of
+    the form ``OSESSION/<session>`` are checked against the webos domains, all others by the static or OAuth
+    verifier. The returned verifier is the static or OAuth one, for the runtime's own checks.
+    """
+    verifier, auth = _primary_auth(settings, environ)
+    os_cfg = settings.auth.osession
+    if not os_cfg.enabled:
+        return verifier, auth, None
+    assert os_cfg.domain_root is not None  # noqa: S101 - enforced by configuration validation
+    domains = DomainDirectory(os_cfg.domain_root, ttl=float(os_cfg.cache_seconds))
+    if auth is None:
+        base = f"http://{settings.http.host}:{settings.http.port}"
+        auth = AuthSettings(
+            issuer_url=base,  # type: ignore[arg-type]  # pydantic coerces str to AnyHttpUrl
+            resource_server_url=f"{base}{settings.http.path}",  # type: ignore[arg-type]
+            validate_token_resource=False,  # a webos session has no audience
+        )
+    log.info("webos sessions (OSESSION bearer) accepted; domains under %s", os_cfg.domain_root)
+    return verifier, auth, domains
+
+
+def _primary_auth(
     settings: Settings, environ: Mapping[str, str]
 ) -> tuple[StaticTokenVerifier | OAuthVerifier | None, AuthSettings | None]:
     base = f"http://{settings.http.host}:{settings.http.port}"
@@ -270,6 +299,9 @@ def _packs(mcp: MCPServer, rt: Runtime, clock: Callable[[], dt.datetime] | None)
         local_user=s.auth.local_user,
         cursor_ttl=s.tools.cursor_ttl_seconds,
         clock=clock,
+        domains=rt.domains,
+        packs=s.tools.packs,
+        db_options=_db_options(s),
     )
     try:
         names = register_packs(mcp, rt.tool_context, s.tools.packs, rt.killswitch, rt.scopes)
@@ -294,7 +326,8 @@ def build_runtime(
     _check_protocol_versions(settings)
     _check_features(settings)
     rt = Runtime(settings, store=store, static_tokens=False)
-    verifier, auth = _auth(settings, env)
+    verifier, auth, domains = _auth(settings, env)
+    rt.domains = domains
     rt.static_tokens = isinstance(verifier, StaticTokenVerifier)
     rt.oauth = verifier if isinstance(verifier, OAuthVerifier) else None
     rt.scopes = ScopePolicy(enforce=rt.oauth is not None and settings.auth.oauth.enforce_scopes)
@@ -305,7 +338,7 @@ def build_runtime(
         title=settings.server.title,
         version=__version__,
         instructions=settings.server.instructions,
-        token_verifier=verifier,
+        token_verifier=DispatchingVerifier(verifier, OSessionVerifier(domains)) if domains else verifier,
         auth=auth,
         middleware=[RequestMiddleware(settings.server.protocol_versions, killswitch)],
     )
@@ -322,7 +355,8 @@ def build_runtime(
         TOOL_CATALOGUE_VERSION,
         len(rt.tool_names),
         ",".join(settings.server.protocol_versions),
-        {StaticTokenVerifier: "static-dev-tokens", OAuthVerifier: "oauth"}.get(type(verifier), "none"),
+        {StaticTokenVerifier: "static-dev-tokens", OAuthVerifier: "oauth"}.get(type(verifier), "none")
+        + ("+osession" if domains else ""),
     )
     return mcp, rt
 

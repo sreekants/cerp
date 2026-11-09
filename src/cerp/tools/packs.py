@@ -15,13 +15,15 @@ from typing import Final
 from mcp.server.mcpserver import MCPServer
 
 from cerp.auth.principals import PrincipalMapper
+from cerp.data.domains import DomainDirectory
 from cerp.data.registry import Registry
 from cerp.data.security import SECURITY, SecurityDirectory
-from cerp.data.sqlite import Databases
+from cerp.data.sqlite import Databases, DbOptions
+from cerp.data.tenants import TenantDatabases
 from cerp.protocol.cursors import CursorSigner
 from cerp.protocol.killswitch import KillSwitch
 from cerp.protocol.scopes import ScopePolicy
-from cerp.tools import crm, personal, personal_write, pm, pm_write
+from cerp.tools import crm, crm_write, personal, personal_write, pm, pm_write
 from cerp.tools.context import Guard, Reads, Registrar, ToolContext, check_reads
 
 PackRegister = Callable[[Registrar, ToolContext], None]
@@ -36,6 +38,7 @@ PACKS: Final[dict[str, tuple[PackRegister, Reads, tuple[Guard, ...]]]] = {
     # Write packs (decision 0003): off unless named, so a read-only deployment stays read-only.
     "pm_write": (pm_write.register, pm_write.READS, pm_write.GUARDS),
     "personal_write": (personal_write.register, personal_write.READS, ()),
+    "crm_write": (crm_write.register, crm_write.READS, crm_write.GUARDS),  # decision 0004
 }
 
 
@@ -53,15 +56,37 @@ def build_context(
     local_user: str | None,
     cursor_ttl: float,
     clock: Callable[[], dt.datetime] | None = None,
+    domains: DomainDirectory | None = None,
+    packs: Iterable[str] = (),
+    db_options: DbOptions | None = None,
 ) -> ToolContext:
+    """The tool context. With ``domains`` (OSESSION enabled, MPC001-286), callers from a webos domain use that
+    domain's databases; each domain's set is checked once against the enabled packs' tables and columns."""
     directory = SecurityDirectory(databases)
+    tenants: TenantDatabases | None = None
+    directory_for: Callable[[str], SecurityDirectory] | None = None
+    if domains is not None:
+        wanted = list(dict.fromkeys(packs))
+
+        def validate(dbs: Databases) -> list[str]:
+            return [f"{n}: {e}" for n in wanted for e in check_reads(dbs, PACKS[n][1])]
+
+        tenants = TenantDatabases(domains, databases, db_options, validate=validate)
+        per_domain: dict[int, SecurityDirectory] = {}
+
+        def directory_for(domain: str) -> SecurityDirectory:
+            assert tenants is not None  # noqa: S101 - set just above
+            dbs = tenants.for_domain(domain)
+            return per_domain.setdefault(id(dbs), SecurityDirectory(dbs))
+
     return ToolContext(
         databases=databases,
         registry=registry,
-        mapper=PrincipalMapper(directory, oauth_map, local_user=local_user),
+        mapper=PrincipalMapper(directory, oauth_map, local_user=local_user, directory_for=directory_for),
         directory=directory,
         cursors=CursorSigner(ttl=cursor_ttl),
         clock=clock or dt.datetime.now,
+        tenants=tenants,
     )
 
 

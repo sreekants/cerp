@@ -9,7 +9,9 @@ A :class:`ToolContext` gives a tool everything it may use, and nothing else:
 * :meth:`rows` runs a **constant** SQL statement with bound values on a read-only connection
   (MPC001-162, MPC001-065) and cleans webos's literal ``'NULL'`` strings (MPC001-163);
 * :meth:`offset` / :meth:`next_cursor` implement signed cursor paging (MPC001-023);
-* :meth:`writer` opens a short write transaction (MPC001-162) for the curated write tools (decision 0003).
+* :meth:`writer` opens a short write transaction (MPC001-162) for the curated write tools (decision 0003);
+* :meth:`active_databases` / :meth:`users` are the caller's domain's databases and security directory when the
+  caller authenticated with an OSESSION (MPC001-286), otherwise the configured default ones.
 
 Each tool pack declares the tables and columns it reads (:data:`Reads`); :func:`check_reads` verifies them
 against the live databases at startup, so a renamed column stops the server instead of failing a call.
@@ -30,12 +32,15 @@ from mcp_types import ToolAnnotations
 from pydantic import StringConstraints
 
 from cerp.auth.authorize import AccessDenied, Caller, authorize, privilege_model
+from cerp.auth.osession import token_domain
 from cerp.auth.principals import PrincipalMapper
+from cerp.data.domains import DomainUnavailable
 from cerp.data.handles import Handle, HandleError
 from cerp.data.records import clean_row
 from cerp.data.registry import Registry
 from cerp.data.security import SecurityDirectory, SecurityUnavailable
 from cerp.data.sqlite import Databases
+from cerp.data.tenants import TenantDatabases
 from cerp.protocol.audit import note_webos_user
 from cerp.protocol.cursors import CursorSigner, query_digest
 from cerp.protocol.errors import NotFound, NotPermitted, ValidationError
@@ -163,7 +168,34 @@ class ToolContext:
     directory: SecurityDirectory
     cursors: CursorSigner
     clock: Callable[[], dt.datetime] = dt.datetime.now
+    tenants: TenantDatabases | None = None  # OSESSION callers' per-domain databases (MPC001-286)
     _privileges: dict[str, str] = field(default_factory=dict)
+    _directories: dict[int, SecurityDirectory] = field(default_factory=dict)
+
+    # ------------------------------------------------------------ the caller's databases
+
+    def active_databases(self) -> Databases:
+        """The databases of this request: the OSESSION domain's, or the configured default."""
+        domain = token_domain(get_access_token())
+        if domain is None:
+            return self.databases
+        if self.tenants is None:
+            raise NotPermitted("webos sessions are not accepted by this server")
+        try:
+            return self.tenants.for_domain(domain)
+        except DomainUnavailable:
+            raise NotPermitted("your domain's data is not available") from None
+
+    def users(self) -> SecurityDirectory:
+        """The security directory of this request's databases."""
+        dbs = self.active_databases()
+        if dbs is self.databases:
+            return self.directory
+        key = id(dbs)
+        found = self._directories.get(key)
+        if found is None:
+            found = self._directories.setdefault(key, SecurityDirectory(dbs))
+        return found
 
     # ------------------------------------------------------------ callers and rights
 
@@ -219,13 +251,13 @@ class ToolContext:
     def rows(
         self, datasource: str, statement: str, params: Mapping[str, Any] | tuple[Any, ...] = ()
     ) -> list[dict[str, Any]]:
-        with self.databases.reader(datasource) as con:
+        with self.active_databases().reader(datasource) as con:
             return [clean_row(dict(r)) for r in con.execute(statement, params).fetchall()]
 
     @contextmanager
     def writer(self, datasource: str) -> Iterator[sqlite3.Connection]:
         """A short write transaction (``BEGIN IMMEDIATE`` … ``COMMIT``); never ``await`` inside it."""
-        with self.databases.writer(datasource) as con:
+        with self.active_databases().writer(datasource) as con:
             yield con
 
     def one(
@@ -245,7 +277,7 @@ class ToolContext:
             if uid <= 0:
                 continue
             try:
-                user = self.directory.user_by_id(uid)
+                user = self.users().user_by_id(uid)
             except SecurityUnavailable:
                 return out
             if user is not None:

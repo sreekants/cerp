@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any, Final, Literal
 
 from pydantic import BaseModel, Field
@@ -477,6 +478,100 @@ def _contact(row: dict[str, Any]) -> dict[str, Any]:
     return with_labels(row, status=ACTIVE)
 
 
+def contact_candidates(
+    ctx: ToolContext,
+    *,
+    email: str | None,
+    phone: str | None,
+    first_name: str | None,
+    last_name: str | None,
+) -> list[Candidate]:
+    """Contacts that may be the same person, best first (MPC001-256); also the create-time check."""
+    mail = (email or "").strip().casefold() or None
+    dom = _domain(mail) if mail else None
+    tail = _digits(phone)[-7:] if phone and len(_digits(phone)) >= 7 else None  # noqa: PLR2004
+    rows = ctx.rows(
+        "crm",
+        _FIND_CONTACT,
+        {
+            "email": mail,
+            "email_domain": like("@" + dom) if dom else None,
+            "last": (last_name or "").strip().casefold() or None,
+            "tail": "%" + tail if tail else None,
+        },
+    )
+    wanted = _norm_name(first_name, last_name)
+    out: list[Candidate] = []
+    for r in rows:
+        scores, reasons = [], []
+        if mail and (r.get("email") or "").strip().casefold() == mail:
+            scores.append(1.0)
+            reasons.append("same email")
+        if phone and (_same_phone(phone, r.get("mobile")) or _same_phone(phone, r.get("business_phone"))):
+            scores.append(0.9)
+            reasons.append("same phone number")
+        have = _norm_name(r.get("first_name"), r.get("last_name"))
+        if first_name and last_name and have == wanted:
+            scores.append(0.7)
+            reasons.append("same name")
+        elif last_name and _norm_name(r.get("last_name")) == _norm_name(last_name):
+            scores.append(0.3)
+            reasons.append("same last name")
+        if dom and _domain(r.get("email")) == dom and "same email" not in reasons:
+            scores.append(0.2)
+            reasons.append("same email domain")
+        if scores:
+            out.append(Candidate(record=_contact(r), score=_combine(scores), reasons=reasons))
+    out.sort(key=lambda c: (-c.score, c.record["id"]))
+    return out[:20]
+
+
+def company_candidates(
+    ctx: ToolContext,
+    statement: str,
+    name: str | None,
+    website: str | None,
+    phone: str | None,
+    *,
+    wrap: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> list[Candidate]:
+    """Accounts (or, with the vendor query and ``wrap``, vendors) that may be the same company, best
+    first (MPC001-256)."""
+    norm = _norm_company(name)
+    word = max(norm.split(), key=len) if norm else None
+    dom = _domain(website)
+    tail = _digits(phone)[-7:] if phone and len(_digits(phone)) >= 7 else None  # noqa: PLR2004
+    rows = ctx.rows(
+        "crm",
+        statement,
+        {
+            "word": like(word) if word else None,
+            "domain": like(dom) if dom else None,
+            "tail": "%" + tail if tail else None,
+        },
+    )
+    out: list[Candidate] = []
+    for r in rows:
+        scores, reasons = [], []
+        have = _norm_company(r.get("name"))
+        if norm and have == norm:
+            scores.append(0.8)
+            reasons.append("same name")
+        elif norm and have and (norm in have or have in norm):
+            scores.append(0.4)
+            reasons.append("similar name")
+        if dom and _domain(r.get("website")) == dom:
+            scores.append(0.9)
+            reasons.append("same website domain")
+        if phone and _same_phone(phone, r.get("phone")):
+            scores.append(0.7)
+            reasons.append("same phone number")
+        if scores:
+            out.append(Candidate(record=(wrap or _account)(r), score=_combine(scores), reasons=reasons))
+    out.sort(key=lambda c: (-c.score, c.record["id"]))
+    return out[:20]
+
+
 def activity_row(row: dict[str, Any]) -> dict[str, Any]:
     row["handle"] = handle("crm", "activity", row["id"])
     for ref, model in (("contact_id", "contact"), ("opportunity_id", "opportunity")):
@@ -616,43 +711,11 @@ def register(reg: Registrar, ctx: ToolContext) -> None:  # noqa: PLR0915 - one c
         ctx.require(caller, CONTACT)
         if not any((email, phone, last_name)):
             raise ValidationError("give an email, a phone or a last name", field="email")
-        mail = (email or "").strip().casefold() or None
-        dom = _domain(mail) if mail else None
-        tail = _digits(phone)[-7:] if phone and len(_digits(phone)) >= 7 else None  # noqa: PLR2004
-        rows = ctx.rows(
-            "crm",
-            _FIND_CONTACT,
-            {
-                "email": mail,
-                "email_domain": like("@" + dom) if dom else None,
-                "last": (last_name or "").strip().casefold() or None,
-                "tail": "%" + tail if tail else None,
-            },
+        return Candidates(
+            candidates=contact_candidates(
+                ctx, email=email, phone=phone, first_name=first_name, last_name=last_name
+            )
         )
-        wanted = _norm_name(first_name, last_name)
-        out: list[Candidate] = []
-        for r in rows:
-            scores, reasons = [], []
-            if mail and (r.get("email") or "").strip().casefold() == mail:
-                scores.append(1.0)
-                reasons.append("same email")
-            if phone and (_same_phone(phone, r.get("mobile")) or _same_phone(phone, r.get("business_phone"))):
-                scores.append(0.9)
-                reasons.append("same phone number")
-            have = _norm_name(r.get("first_name"), r.get("last_name"))
-            if first_name and last_name and have == wanted:
-                scores.append(0.7)
-                reasons.append("same name")
-            elif last_name and _norm_name(r.get("last_name")) == _norm_name(last_name):
-                scores.append(0.3)
-                reasons.append("same last name")
-            if dom and _domain(r.get("email")) == dom and "same email" not in reasons:
-                scores.append(0.2)
-                reasons.append("same email domain")
-            if scores:
-                out.append(Candidate(record=_contact(r), score=_combine(scores), reasons=reasons))
-        out.sort(key=lambda c: (-c.score, c.record["id"]))
-        return Candidates(candidates=out[:20])
 
     reg(find_contact, "crm.find_contact", "Find a contact")
 
@@ -665,39 +728,7 @@ def register(reg: Registrar, ctx: ToolContext) -> None:  # noqa: PLR0915 - one c
         ctx.require(caller, ACCOUNT)
         if not any((name, website, phone)):
             raise ValidationError("give a name, a website or a phone", field="name")
-        norm = _norm_company(name)
-        word = max(norm.split(), key=len) if norm else None
-        dom = _domain(website)
-        tail = _digits(phone)[-7:] if phone and len(_digits(phone)) >= 7 else None  # noqa: PLR2004
-        rows = ctx.rows(
-            "crm",
-            _FIND_ACCOUNT,
-            {
-                "word": like(word) if word else None,
-                "domain": like(dom) if dom else None,
-                "tail": "%" + tail if tail else None,
-            },
-        )
-        out: list[Candidate] = []
-        for r in rows:
-            scores, reasons = [], []
-            have = _norm_company(r.get("name"))
-            if norm and have == norm:
-                scores.append(0.8)
-                reasons.append("same name")
-            elif norm and have and (norm in have or have in norm):
-                scores.append(0.4)
-                reasons.append("similar name")
-            if dom and _domain(r.get("website")) == dom:
-                scores.append(0.9)
-                reasons.append("same website domain")
-            if phone and _same_phone(phone, r.get("phone")):
-                scores.append(0.7)
-                reasons.append("same phone number")
-            if scores:
-                out.append(Candidate(record=_account(r), score=_combine(scores), reasons=reasons))
-        out.sort(key=lambda c: (-c.score, c.record["id"]))
-        return Candidates(candidates=out[:20])
+        return Candidates(candidates=company_candidates(ctx, _FIND_ACCOUNT, name, website, phone))
 
     reg(find_account, "crm.find_account", "Find an account")
 

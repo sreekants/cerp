@@ -152,9 +152,25 @@ class PrincipalMap(_Section):
     user: str = Field(min_length=1, description="webos user name in security.users")
 
 
+class OSessionAuth(_Section):
+    """webos sessions as bearer tokens, ``OSESSION/<cookie value>`` (MPC001-286, decision 0005)."""
+
+    enabled: bool = False
+    # The cluster's domains folder: nodedb.s3db and <G0>/<G1>/<GUID>/db/*.s3db, e.g. .../cluster/domains
+    domain_root: Path | None = None
+    cache_seconds: int = Field(default=300, ge=0, le=3600, description="domain name -> GUID cache")
+
+    @model_validator(mode="after")
+    def _root(self) -> OSessionAuth:
+        if self.enabled and self.domain_root is None:
+            raise ValueError("auth.osession.domain_root is required when auth.osession is enabled")
+        return self
+
+
 class AuthSection(_Section):
     static_tokens: StaticTokens = StaticTokens()
     oauth: OAuth = OAuth()
+    osession: OSessionAuth = OSessionAuth()  # alongside static tokens or OAuth, or on its own (MPC001-286)
     # MPC001-060: OAuth principals -> webos users. Static tokens name their user directly.
     principals: list[PrincipalMap] = Field(default_factory=list)
     # MPC001-168 (interim): the webos user a local stdio client acts as. Refused with HTTP authentication,
@@ -165,7 +181,9 @@ class AuthSection(_Section):
     def _one_method(self) -> AuthSection:
         if self.static_tokens.enabled and self.oauth.enabled:
             raise ValueError("auth: enable static_tokens or oauth, not both")
-        if self.local_user is not None and (self.static_tokens.enabled or self.oauth.enabled):
+        if self.local_user is not None and (
+            self.static_tokens.enabled or self.oauth.enabled or self.osession.enabled
+        ):
             raise ValueError("auth.local_user is for stdio only and cannot be combined with HTTP auth")
         seen: set[tuple[str, str]] = set()
         for p in self.principals:
@@ -220,7 +238,7 @@ class LimitsSection(_Section):
     anonymous_burst: int = Field(default=5, ge=1)
 
 
-ToolPack = Literal["pm", "crm", "personal", "pm_write", "personal_write"]
+ToolPack = Literal["pm", "crm", "personal", "pm_write", "personal_write", "crm_write"]
 
 
 class ToolsSection(_Section):

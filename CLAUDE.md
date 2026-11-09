@@ -52,14 +52,15 @@ Always run all four checks before saying a change is done. Use `uv add` / `uv ad
 | bottom | `cerp.data` — registry loader, SQLite access, record conventions | nothing in cerp |
 
 Key choices: Python ≥ 3.13 with uv; official MCP Python SDK (`mcp`, `MCPServer`) over Streamable HTTP and stdio;
-direct SQLite access to the webos databases through the generated model registry; OAuth only (no HMAC); the persona
+direct SQLite access to the webos databases through the generated model registry; OAuth (no HMAC), plus webos
+sessions as `OSESSION/<cookie>` bearers with per-domain databases (decision 0005, MPC001-286); the persona
 runner uses the Claude Agent SDK (`claude-agent-sdk`, optional extra `runner`). See `docs/webos/decisions/0001-python-baseline.md`.
 
 ## Rules that are easy to break
 
 - **SQL:** identifiers only from the registry, values only as `?` parameters. Never build SQL with f-strings (MPC001-008, MPC001-065).
 - **Read-only by default:** read tools use `mode=ro` connections; keep write transactions short (`BEGIN IMMEDIATE`, no `await` inside) (MPC001-162).
-- **No deletes:** persona-reachable code never issues `DELETE`; use the model's soft-delete state (MPC002-044, MPC001-163).
+- **No deletes:** persona-reachable code never issues `DELETE`; use the model's soft-delete state (MPC002-044, MPC001-163). One exception: unlinking a contact from a project deletes its `project_contacts` row (decision 0004); the guardrail lint allows that exact statement in `crm_write.py` only.
 - **Never change webos schemas** except through a reviewed migration (MPC001-166). The C++ web UI writes the same files.
 - **Authorization** goes through one function and must be equal to or stricter than webos (MPC001-061, MPC002-007). Fail closed.
 - **Drafts first:** nothing a persona creates is sent or finalised without an approval record (MPC002-045, MPC002-071).

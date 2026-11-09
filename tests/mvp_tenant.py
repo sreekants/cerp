@@ -42,6 +42,10 @@ READER_RIGHTS: Final = (
 
 EDITOR_RIGHTS: Final = (
     "TodoList.Add", "TodoList.Edit", "TodoList.Delete", "TodoListItem.Add", "TodoListItem.Edit",
+    # decision 0004
+    "Account.Add", "Account.Edit", "Account.Delete", "Contact.Add", "Contact.Edit", "Contact.Delete",
+    "Vendor.View", "Vendor.Add", "Vendor.Edit", "Vendor.Delete",
+    "ProjectContact.Add", "ProjectContact.Delete",
 )  # fmt: skip
 
 # user id, login, first, last, enabled, groups
@@ -258,6 +262,12 @@ def seed_business(dbroot: Path) -> None:
             "inventory_items",
             ("id", "account_id", "product_id", "quantity", "purchase_date", "support_end_date"),
             [(1001, 1001, 7, 3, "2025-01-15", "2027-01-15")],
+        )
+        _insert(
+            crm,
+            "vendors",
+            ("id", "name", "owner_id", "owner", "status", "website", "phone", "contact_id"),
+            [(1001, "Parts Supply AS", 2, "Alice Andersen", 1000, "parts.no", "+47 22 00 11 22", 0)],
         )
         _insert(crm, "sales_teams", ("id", "name", "owner"), [(1, "Nordic", "Alice Andersen")])
         _insert(
