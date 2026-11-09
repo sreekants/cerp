@@ -1,0 +1,54 @@
+# cerp as a supervised systemd service (MPC001-120).
+#
+# Install (as root):
+#   useradd --system --home-dir /var/lib/cerp --shell /usr/sbin/nologin cerp
+#   install -d -o cerp -g cerp -m 0750 /var/lib/cerp /var/log/cerp
+#   install -d -o root -g cerp -m 0750 /etc/cerp      # cerp.yaml, exposure.yaml, registry.yaml (read-only)
+#   python3.13 -m venv /opt/cerp && /opt/cerp/bin/pip install --require-hashes -r requirements.txt cerp-*.whl
+#   install -m 0644 cerp.service /etc/systemd/system/ && systemctl daemon-reload
+#   systemctl enable --now cerp
+#
+# Database access (MPC001-120 requirement 2): grant the cerp group read access to the webos databases it
+# reads and write access only to those it writes, e.g. with setfacl, and list them in ReadWritePaths /
+# ReadOnlyPaths below. Nothing else on the file system is visible to the service.
+
+[Unit]
+Description=cerp (Claude ERP) MCP server
+Documentation=file:///opt/cerp/docs/operations/service.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=cerp
+Group=cerp
+EnvironmentFile=-/etc/cerp/cerp.env
+ExecStart=/opt/cerp/bin/cerp serve --config /etc/cerp/cerp.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+KillSignal=SIGTERM
+
+# Least privilege
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0027
+ReadOnlyPaths=/etc/cerp /opt/cerp
+ReadWritePaths=/var/lib/cerp /var/log/cerp
+# Add the webos database folder, e.g.:
+# ReadWritePaths=/srv/webos/db
+
+[Install]
+WantedBy=multi-user.target
