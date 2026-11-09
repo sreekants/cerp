@@ -52,7 +52,8 @@ GUID_OFF = "0a0a0a0a-0000-4000-8000-000000000000"
 
 def session(domain: str, user_id: int, guid: str, salt: str = "6F1C2B9E-1111-4222-8333-944455556666") -> str:
     text = f"{domain},{user_id},{salt}"
-    digest = hashlib.md5((guid + text).encode(), usedforsecurity=False).hexdigest()
+    raw = hashlib.md5((guid + text).encode(), usedforsecurity=False).digest()
+    digest = "".join(f"{b:02x}"[::-1] for b in raw)  # webos prints each byte low nibble first
     return f"{text},{digest}"
 
 
@@ -82,6 +83,15 @@ def test_parse_plain_and_url_encoded() -> None:
     assert (s.domain, s.user_id) == ("exocortex", "2")
     assert parse(quote(raw, safe="")) == s  # cookies often arrive with commas as %2C
     assert seal(GUID_A, s) == s.digest
+
+
+def test_seal_matches_webos_known_vector() -> None:
+    # Worked by hand from empact's CMD5::GetDigest (stream PrintDigest: low nibble, then high nibble).
+    # Plain MD5 hex of the same input is c20c77c058ccbc13a3a0b30ac01576bc; webos swaps each pair.
+    s = parse("acme,7,0f0e0d0c-0b0a-0908-0706-050403020100,2cc0770c85cccb313a0a3ba00c5167cb")
+    assert s is not None
+    assert seal("00000000-1111-2222-3333-444444444444", s) == s.digest
+    assert seal("00000000-1111-2222-3333-444444444444", s) != "c20c77c058ccbc13a3a0b30ac01576bc"
 
 
 @pytest.mark.parametrize(

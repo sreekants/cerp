@@ -2,8 +2,8 @@
 
 The bearer value is ``OSESSION/<session>``. ``<session>`` is the webos ``OSESSION`` cookie value, URL-encoded
 or not: ``domain,user_id,salt,hash``. It is checked exactly as ``Session::FromString`` (Cortex,
-``code/webos/src/odesk/portable/Session.cpp``) checks it: ``hash`` must equal the MD5 hex digest of the
-domain's GUID (``nodedb.s3db``, :mod:`cerp.data.domains`) followed by ``domain,user_id,salt``. The digest is
+``code/webos/src/odesk/portable/Session.cpp``) checks it: ``hash`` must equal the MD5 digest, in webos's
+nibble-swapped hex (:func:`webos_hex`), of the domain's GUID (``nodedb.s3db``, :mod:`cerp.data.domains`) followed by ``domain,user_id,salt``. The digest is
 compared in constant time and without regard to hex case.
 
 A verified session yields an access token whose subject is the webos user id and whose ``domain`` claim names
@@ -76,9 +76,19 @@ def parse(value: str) -> OSession | None:
     return OSession(domain, user_id, salt, digest)
 
 
+def webos_hex(digest: bytes) -> str:
+    """Hex as webos prints a digest: each byte's low nibble first.
+
+    ``CMD5::GetDigest`` (empact, ``code/system/src/sec/portable/md5.cpp``) writes through the stream form of
+    ``CCryptographicHash::PrintDigest``, which emits ``inttohexlwr(ch)`` and then ``inttohexlwr(ch >> 4)``, so
+    every byte's two hex digits come out swapped compared with ``hexdigest()``.
+    """
+    return "".join(f"{b:02x}"[::-1] for b in digest)
+
+
 def seal(guid: str, session: OSession) -> str:
-    """The MD5 hex digest webos expects: MD5(guid + "domain,user_id,salt")."""
-    return hashlib.md5((guid + session.signed_text).encode("utf-8"), usedforsecurity=False).hexdigest()
+    """The digest webos expects: MD5(guid + "domain,user_id,salt"), printed by :func:`webos_hex`."""
+    return webos_hex(hashlib.md5((guid + session.signed_text).encode("utf-8"), usedforsecurity=False).digest())
 
 
 class OSessionVerifier:
