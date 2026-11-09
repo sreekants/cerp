@@ -11,7 +11,7 @@ Wants=network-online.target
 Type=exec
 User=ec2-user
 WorkingDirectory=/home/ec2-user/projects/cerp
-Environment=MCP_DB_DIR=/home/ec2-user/projects/cerp/deploy/mcp-gateway/db
+Environment=MCP_DB_DIR=/home/ec2-user/environment/cluster/domains/4/D/4DF72D07-B9AD-45E8-96A7-F45A9A1B86EC/db
 ExecStart=/home/ec2-user/projects/cerp/.venv/bin/python deploy/mcp-gateway/gateway.py --port 7410 --prefix /mcp/webos
 Restart=on-failure
 RestartSec=5
