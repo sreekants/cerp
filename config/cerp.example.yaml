@@ -41,6 +41,13 @@ tools:
   packs: []              # read-only decision-support tools: [pm, crm, personal] (MPC001-088)
   cursor_ttl_seconds: 900
 
+notify:                  # Portal planners' doorbells (Portal PTL001-310/311): pm_write task writes ring m=WORK
+  enabled: false         # in the plate users' in-memory inboxes, /memq/<domain GUID>/user/<id>, on the webos node
+  url: http://127.0.0.1:4080   # the webos node serving /.Cluster/MessageQueue
+  # domain: exocortex          # the default databases' domain (static tokens, OAuth); OSESSION callers use theirs
+  # guid: 4df72d07-b9ad-45e8-96a7-f45a9a1b86ec   # optional with auth.osession.domain_root (read from nodedb.s3db)
+  timeout_s: 2
+
 kill_switches: {}        # e.g. {writes: true, "module:crm": true, "tool:im.create_ticket": true} (MPC001-116)
 
 data:

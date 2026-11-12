@@ -25,7 +25,8 @@ from cerp.auth.oauth import IntrospectionConfig, OAuthConfig, OAuthVerifier
 from cerp.auth.osession import DispatchingVerifier, OSessionVerifier
 from cerp.auth.static import StaticTokenSpec, StaticTokenVerifier, assert_loopback
 from cerp.data.datasources import DatasourceError, DatasourceLocator
-from cerp.data.domains import DomainDirectory
+from cerp.data.domains import DomainDirectory, DomainUnavailable
+from cerp.data.doorbell import Doorbell
 from cerp.data.exposure import Exposure, load_exposure
 from cerp.data.registry import Registry, load_registry
 from cerp.data.sqlite import Databases, DbOptions
@@ -286,6 +287,31 @@ def _data(settings: Settings, rt: Runtime, environ: Mapping[str, str]) -> None:
         rt.exposure = load_exposure(settings.exposure.path, rt.registry, live)
 
 
+def _notify(rt: Runtime) -> None:
+    """Portal planners' doorbells (PTL001-311): task writes ring the plate users' in-memory inboxes."""
+    n = rt.settings.notify
+    ctx = rt.tool_context
+    if not n.enabled or ctx is None:
+        return
+    guid = n.guid
+    if n.domain and guid is None and rt.domains is not None:
+        try:
+            guid = rt.domains.guid(n.domain)
+        except DomainUnavailable:
+            guid = None
+    if n.domain and guid is None:
+        raise StartupError(
+            f"notify.domain {n.domain!r}: its GUID is unknown; set notify.guid or auth.osession.domain_root"
+        )
+    try:
+        ctx.doorbell = Doorbell(n.url, timeout_s=n.timeout_s)
+    except ValueError as exc:
+        raise StartupError(f"notify.url: {exc}") from None
+    ctx.notify_domain = (n.domain.strip().lower(), guid) if n.domain and guid else None
+    default = ctx.notify_domain[0] if ctx.notify_domain else "none"
+    log.info("planner doorbells on (%s; default domain %s)", n.url, default)
+
+
 def _packs(mcp: MCPServer, rt: Runtime, clock: Callable[[], dt.datetime] | None) -> list[str]:
     """Register the curated read-only tool packs (MPC001-088) after checking what they need."""
     s = rt.settings
@@ -303,6 +329,7 @@ def _packs(mcp: MCPServer, rt: Runtime, clock: Callable[[], dt.datetime] | None)
         packs=s.tools.packs,
         db_options=_db_options(s),
     )
+    _notify(rt)
     try:
         names = register_packs(mcp, rt.tool_context, s.tools.packs, rt.killswitch, rt.scopes)
     except PackError as exc:

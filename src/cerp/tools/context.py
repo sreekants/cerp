@@ -11,7 +11,8 @@ A :class:`ToolContext` gives a tool everything it may use, and nothing else:
 * :meth:`offset` / :meth:`next_cursor` implement signed cursor paging (MPC001-023);
 * :meth:`writer` opens a short write transaction (MPC001-162) for the curated write tools (decision 0003);
 * :meth:`active_databases` / :meth:`users` are the caller's domain's databases and security directory when the
-  caller authenticated with an OSESSION (MPC001-286), otherwise the configured default ones.
+  caller authenticated with an OSESSION (MPC001-286), otherwise the configured default ones;
+* :meth:`ring_plates` rings the Portal planners of the users a committed write concerns (Portal PTL001-311).
 
 Each tool pack declares the tables and columns it reads (:data:`Reads`); :func:`check_reads` verifies them
 against the live databases at startup, so a renamed column stops the server instead of failing a call.
@@ -20,6 +21,7 @@ against the live databases at startup, so a renamed column stops the server inst
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -35,6 +37,7 @@ from cerp.auth.authorize import AccessDenied, Caller, authorize, privilege_model
 from cerp.auth.osession import token_domain
 from cerp.auth.principals import PrincipalMapper
 from cerp.data.domains import DomainUnavailable
+from cerp.data.doorbell import Doorbell
 from cerp.data.handles import Handle, HandleError
 from cerp.data.records import clean_row
 from cerp.data.registry import Registry
@@ -47,6 +50,8 @@ from cerp.protocol.errors import NotFound, NotPermitted, ValidationError
 from cerp.protocol.killswitch import KillSwitch
 from cerp.protocol.scopes import ScopePolicy
 from cerp.protocol.tooling import register_tool
+
+log = logging.getLogger("cerp.tools")
 
 DEFAULT_PAGE: Final = 25
 MAX_PAGE: Final = 100
@@ -169,6 +174,8 @@ class ToolContext:
     cursors: CursorSigner
     clock: Callable[[], dt.datetime] = dt.datetime.now
     tenants: TenantDatabases | None = None  # OSESSION callers' per-domain databases (MPC001-286)
+    doorbell: Doorbell | None = None  # the Portal planners' doorbells (config ``notify``, PTL001-311)
+    notify_domain: tuple[str, str] | None = None  # the default databases' webos domain: (name, GUID)
     _privileges: dict[str, str] = field(default_factory=dict)
     _directories: dict[int, SecurityDirectory] = field(default_factory=dict)
 
@@ -196,6 +203,40 @@ class ToolContext:
         if found is None:
             found = self._directories.setdefault(key, SecurityDirectory(dbs))
         return found
+
+    # ------------------------------------------------------------ Portal planners (PTL001-310/311)
+
+    def _bell_target(self) -> tuple[str, str] | None:
+        """(domain name, GUID) of this request's databases: the OSESSION domain's, or the default."""
+        domain = token_domain(get_access_token())
+        if domain is None:
+            return self.notify_domain
+        if self.tenants is None:
+            return None
+        guid = self.tenants.domains.guid(domain)
+        return (domain, guid) if guid else None
+
+    def ring_plates(self, users: Iterable[Any], caller: Caller | None = None) -> None:
+        """After a committed write, ring ``m=WORK`` for the users whose Portal plate it changed, and for the
+        caller (their other open planners). Never raises: a lost bell only delays a planner until its next
+        load, because the planner always reads the database (PTL001-310 item 7)."""
+        if self.doorbell is None:
+            return
+        try:
+            target = self._bell_target()
+            if target is None:
+                return
+            ids: set[int] = set()
+            for u in users:
+                try:
+                    ids.add(int(u))
+                except (TypeError, ValueError):
+                    continue
+            if caller is not None:
+                ids.add(caller.user_id)
+            self.doorbell.ring(target[0], target[1], [i for i in ids if i > 0])
+        except Exception:  # a doorbell must never fail the write it follows
+            log.warning("planner doorbell not rung", exc_info=True)
 
     # ------------------------------------------------------------ callers and rights
 

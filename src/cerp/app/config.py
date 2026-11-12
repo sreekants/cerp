@@ -248,6 +248,28 @@ class ToolsSection(_Section):
     cursor_ttl_seconds: int = Field(default=900, ge=60, le=86400)  # MPC001-023
 
 
+class NotifySection(_Section):
+    """Doorbells for the Portal's planners (Portal PTL001-310/311): after a task write, ring ``m=WORK`` in the
+    plate users' in-memory inboxes on the webos node, so an open "Plan your day" reloads within seconds."""
+
+    enabled: bool = False
+    url: str = Field(
+        default="http://127.0.0.1:4080", description="the webos node serving /.Cluster/MessageQueue"
+    )
+    # The webos domain of the default databases (static tokens, OAuth, stdio). OSESSION callers use their own.
+    domain: str | None = None
+    # Its GUID (the inbox path uses the GUID, never the name). Looked up in nodedb.s3db when omitted and
+    # auth.osession.domain_root is set.
+    guid: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+    timeout_s: float = Field(default=2.0, gt=0, le=30)
+
+    @model_validator(mode="after")
+    def _check(self) -> NotifySection:
+        if self.enabled and not self.url.startswith(("http://", "https://")):
+            raise ValueError("notify.url must be an http(s) URL")
+        return self
+
+
 class LoggingSection(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     file: Path | None = None
@@ -267,6 +289,7 @@ class Settings(_Section):
     limits: LimitsSection = LimitsSection()
     kill_switches: dict[str, bool] = Field(default_factory=dict)
     tools: ToolsSection = ToolsSection()
+    notify: NotifySection = NotifySection()
     logging: LoggingSection = LoggingSection()
 
     @model_validator(mode="after")

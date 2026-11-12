@@ -10,6 +10,10 @@ Procedures: ``docs/webos/pm/pm.INSTRUCTIONS.md`` §7 and §7.1 (MPC001-207 requi
   insert names ``status``, ``budgeted``, ``estimated`` and ``billed`` (``pm.md`` §9.1).
 * "Delete" sets ``status = -1``; nothing here issues ``DELETE`` (MPC001-207 requirement 2). A deleted list,
   or an item in one, reads as not found.
+* Every write that can change a Portal plate rings the planners of the users concerned once it has
+  committed (Portal PTL001-311, cerp update journal 17): the users whose plate the task was on before the
+  write and is on after it (``assigned_to``, or ``owner_id`` when unassigned), and the caller. See
+  :meth:`~cerp.tools.context.ToolContext.ring_plates`.
 """
 
 from __future__ import annotations
@@ -149,6 +153,15 @@ WHERE id = :id AND IFNULL(status, 0) <> -1
 """
 _COMMENT_ITEM = "UPDATE todo_list_items SET comments = ? WHERE id = ? AND IFNULL(status, 0) <> -1"
 _STATUS_ITEM = "UPDATE todo_list_items SET status = ? WHERE id = ? AND IFNULL(status, 0) <> -1"
+# The Portal's plate rule (PTL001-301): a task is on its assignee's plate, or its owner's when unassigned.
+_PLATE_ITEM = """
+SELECT CASE WHEN IFNULL(assigned_to, 0) <> 0 THEN assigned_to ELSE IFNULL(owner_id, 0) END
+FROM todo_list_items WHERE id = ?
+"""
+_PLATE_LIST = """
+SELECT DISTINCT CASE WHEN IFNULL(assigned_to, 0) <> 0 THEN assigned_to ELSE IFNULL(owner_id, 0) END
+FROM todo_list_items WHERE todo_list_id = ? AND IFNULL(status, 0) <> -1
+"""
 
 
 class TodoListResult(BaseModel):
@@ -195,6 +208,11 @@ def _open_item(
     if item is None or _as_int(item["status"]) == DELETED:
         raise NotFound(f"{what} not found")
     return item, _open_list(con, caller, _as_int(item["todo_list_id"]), what)
+
+
+def _plate(con: sqlite3.Connection, statement: str, key: int) -> set[int]:
+    """The users whose Portal plate the task (or the list's tasks) is on (PTL001-301 plate rule)."""
+    return {u for u in (_as_int(r[0]) for r in con.execute(statement, (key,)).fetchall()) if u > 0}
 
 
 def _list_out(con: sqlite3.Connection, list_id: int) -> dict[str, Any]:
@@ -282,6 +300,7 @@ def register(reg: Registrar, ctx: ToolContext) -> None:  # noqa: PLR0915 - one c
         lid = record_id(todo_list, "pm", "todo_list", "todo_list")
         with ctx.writer("pm") as con:
             _open_list(con, caller, lid, f"to-do list {todo_list}")
+            users = _plate(con, _PLATE_LIST, lid)  # the list's title and priority show on its tasks' cards
             con.execute(
                 _UPDATE_LIST,
                 {
@@ -293,7 +312,9 @@ def register(reg: Registrar, ctx: ToolContext) -> None:  # noqa: PLR0915 - one c
                     "end_date": end_date,
                 },
             )
-            return TodoListResult(todo_list=_list_out(con, lid))
+            out = TodoListResult(todo_list=_list_out(con, lid))
+        ctx.ring_plates(users, caller)
+        return out
 
     reg(update_todo_list, "pm.update_todo_list", "Change a to-do list", IDEMPOTENT_WRITE)
 
@@ -305,8 +326,11 @@ def register(reg: Registrar, ctx: ToolContext) -> None:  # noqa: PLR0915 - one c
         lid = record_id(todo_list, "pm", "todo_list", "todo_list")
         with ctx.writer("pm") as con:
             _open_list(con, caller, lid, f"to-do list {todo_list}")
+            users = _plate(con, _PLATE_LIST, lid)  # its tasks leave their plates with it
             con.execute(_DELETE_LIST, (lid,))
-            return TodoListResult(todo_list=_list_out(con, lid))
+            out = TodoListResult(todo_list=_list_out(con, lid))
+        ctx.ring_plates(users, caller)
+        return out
 
     reg(delete_todo_list, "pm.delete_todo_list", "Delete a to-do list", WRITE)
 
@@ -344,7 +368,11 @@ def register(reg: Registrar, ctx: ToolContext) -> None:  # noqa: PLR0915 - one c
                     "estimated": estimated or 0,
                 },
             )
-            return TaskResult(task=_item_out(con, int(cur.lastrowid or 0)))
+            iid = int(cur.lastrowid or 0)
+            users = _plate(con, _PLATE_ITEM, iid)
+            out = TaskResult(task=_item_out(con, iid))
+        ctx.ring_plates(users, caller)
+        return out
 
     reg(create_task, "pm.create_task", "Add a task", WRITE)
 
@@ -366,6 +394,7 @@ def register(reg: Registrar, ctx: ToolContext) -> None:  # noqa: PLR0915 - one c
         with ctx.writer("pm") as con:
             _, lst = _open_item(con, caller, iid, f"task {task}")
             _check_assignee(ctx, caller, assigned_to, personal=_as_int(lst["project_id"]) == 0)
+            users = _plate(con, _PLATE_ITEM, iid)  # before: a reassignment rings the user it leaves
             con.execute(
                 _UPDATE_ITEM,
                 {
@@ -377,7 +406,10 @@ def register(reg: Registrar, ctx: ToolContext) -> None:  # noqa: PLR0915 - one c
                     "category": category,
                 },
             )
-            return TaskResult(task=_item_out(con, iid))
+            users |= _plate(con, _PLATE_ITEM, iid)  # after: and the user it reaches
+            out = TaskResult(task=_item_out(con, iid))
+        ctx.ring_plates(users, caller)
+        return out
 
     reg(update_task, "pm.update_task", "Change a task", IDEMPOTENT_WRITE)
 
@@ -402,7 +434,10 @@ def register(reg: Registrar, ctx: ToolContext) -> None:  # noqa: PLR0915 - one c
         iid = record_id(task, "pm", "todo_list_item", "task")
         with ctx.writer("pm") as con:
             _open_item(con, caller, iid, f"task {task}")
+            users = _plate(con, _PLATE_ITEM, iid)  # a completed task leaves the plate; unchecked, it returns
             con.execute(_STATUS_ITEM, (TASK_COMPLETED if done else TASK_NEW, iid))
-            return TaskResult(task=_item_out(con, iid))
+            out = TaskResult(task=_item_out(con, iid))
+        ctx.ring_plates(users, caller)
+        return out
 
     reg(check_task, "pm.check_task", "Check off a task", IDEMPOTENT_WRITE)
